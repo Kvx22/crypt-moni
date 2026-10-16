@@ -5,8 +5,10 @@ scanner, allocation). It is deterministic, has no learned parameters, and sits
 between every order intent and the (paper) broker. If the model is wrong or
 the process is confused, these checks still hold.
 
-This build is PAPER ONLY. The gate refuses every mode except "paper", so no
-code path here can reach a real exchange.
+Paper by default. "live" mode is refused unless it is armed twice (config
+`live_armed: true` AND environment variable CM_LIVE=1). Even then the engine
+only queues orders: nothing is sent until a human approves it, and approved
+orders come back through this gate with fresh prices before they go out.
 
 Pieces:
   KillSwitch      - a file on disk. If it exists, no order passes. The dashboard
@@ -30,7 +32,8 @@ from .models import Order
 
 @dataclass
 class SafetyConfig:
-    mode: str = "paper"                      # the only mode this build accepts
+    mode: str = "paper"                      # "paper" | "live" (human-approved orders only)
+    live_armed: bool = False                 # must ALSO be true (plus env CM_LIVE=1) for live orders
     max_per_trade_usd: float | None = None   # UNSET => every order rejected
     on_cap_exceeded: str = "clamp"           # "clamp" to the cap, or "reject"
     max_orders_per_day: int = 60
@@ -60,6 +63,10 @@ class SafetyConfig:
             if hasattr(base, k):
                 setattr(base, k, v)
         return base
+
+
+def live_armed(c: "SafetyConfig") -> bool:
+    return c.mode == "live" and c.live_armed is True and os.environ.get("CM_LIVE") == "1"
 
 
 # ----------------------------------------------------------------------------
@@ -181,8 +188,10 @@ class SafetyGate:
         c = self.cfg
         if self.kill.engaged():
             return self._no(f"KILL SWITCH engaged ({self.kill.reason()})")
-        if c.mode != "paper":
-            return self._no(f"mode {c.mode!r} refused: this build is paper-only")
+        if c.mode not in ("paper", "live"):
+            return self._no(f"unknown mode {c.mode!r}")
+        if c.mode == "live" and not live_armed(c):
+            return self._no("live mode not armed (needs live_armed=true in config AND env CM_LIVE=1)")
         if c.max_per_trade_usd is None or not (c.max_per_trade_usd > 0):
             return self._no("MAX_PER_TRADE_USD is unset: refusing all orders")
         if o.side not in ("buy", "sell"):

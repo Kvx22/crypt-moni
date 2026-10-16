@@ -1,0 +1,87 @@
+{
+  "universe": [
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "DOGE-USD",
+    "ADA-USD",
+    "AVAX-USD",
+    "LINK-USD",
+    "LTC-USD",
+    "BCH-USD",
+    "DOT-USD",
+    "AAVE-USD"
+  ],
+  "market_proxy": "BTC-USD",
+  "db": "data/robinhood.db",
+  "daily_csv": "data/BTC-USD.csv",
+  "scan_seconds": 60,
+  "horizon_hours": 4,
+  "rebalance_every_hours": 8,
+  "rebalance_band_pct": 0.03,
+  "min_trade_usd": 10,
+  "alert_cooldown_hours": 3,
+  "warmup_days": 365,
+  "feed": {
+    "kind": "live",
+    "sources": [
+      "coinbase",
+      "coinbase-advanced",
+      "kraken"
+    ]
+  },
+  "paper": {
+    "start_cash": 10000,
+    "fee_bps": 40,
+    "slippage_bps": 5
+  },
+  "desk": {
+    "ridge": 1000,
+    "decay": 0.995,
+    "eta": 0.08,
+    "top_k": 3
+  },
+  "allocator": {
+    "max_invested": 0.9,
+    "target_vol": 0.55,
+    "max_names": 4,
+    "caps": {
+      "BTC-USD": 0.5,
+      "ETH-USD": 0.35
+    },
+    "default_cap": 0.15,
+    "stickiness": 0.3
+  },
+  "safety": {
+    "mode": "live",
+    "max_per_trade_usd": null,
+    "on_cap_exceeded": "clamp",
+    "max_position_pct": {
+      "BTC-USD": 0.5,
+      "ETH-USD": 0.35
+    },
+    "default_max_position_pct": 0.15,
+    "kill_file": "data/KILL",
+    "live_armed": false
+  },
+  "watchdog": {
+    "poll": 60,
+    "stale_s": 900,
+    "hard_dd": 0.3
+  },
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8767
+  },
+  "conviction_hours": 12,
+  "execution": {
+    "broker": "robinhood",
+    "snapshot": "data/robinhood_snapshot.json",
+    "snapshot_max_age_h": 24,
+    "approval_ttl_min": 120,
+    "approve_token": null,
+    "ntfy_topic": null,
+    "dashboard_url": null
+  }
+}

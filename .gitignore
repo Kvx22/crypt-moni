@@ -6,3 +6,6 @@ data/*.db-shm
 KILL
 data/KILL*
 .venv/
+secrets/
+.env
+data/robinhood_snapshot.json

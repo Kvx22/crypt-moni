@@ -111,7 +111,10 @@ th[data-k]{cursor:pointer;user-select:none} th[data-k]:hover{color:var(--fg)} th
 .ev{border-left:3px solid var(--line);padding:4px 0 4px 10px;margin:7px 0} .ev.warn{border-color:var(--warn)} .ev.critical{border-color:var(--bad)} .ev.info{border-color:var(--faint)}
 .ev .t{font-weight:600;font-size:13px} .ev .m{color:var(--muted);font-size:12.5px} .ev .d{font-size:11px;color:var(--faint);font-family:var(--mono)}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px} .chip{font-size:12px;padding:3px 10px;border-radius:999px;border:1px solid var(--line);cursor:pointer;background:none;color:var(--muted)} .chip.on{color:var(--fg);border-color:var(--accent)}
-.b{font-size:11px;border-radius:6px;padding:1px 7px;border:1px solid var(--line)} .b.buy{color:var(--good);border-color:var(--good)} .b.sell{color:var(--bad);border-color:var(--bad)}
+.b{font-size:11px;border-radius:6px;padding:1px 7px;border:1px solid var(--line)}
+button.ok{border-color:var(--good);color:var(--good);font-weight:600} button.ok:hover{background:var(--good);color:#fff}
+.ob{border:1px solid var(--accent)} .ob h2{color:var(--accent)} .st{font:500 11px var(--mono);white-space:nowrap}
+.st.sent,.st.approved{color:var(--good)} .st.failed,.st.check,.st.skipped{color:var(--bad)} .st.pending{color:var(--accent)} .b.buy{color:var(--good);border-color:var(--good)} .b.sell{color:var(--bad);border-color:var(--bad)}
 /* learning */
 .lv{display:grid;grid-template-columns:minmax(110px,34%) minmax(0,1fr) 92px;gap:4px 10px;align-items:center;font-size:12px;margin-top:6px}
 .lv .tr{position:relative;height:16px}.lv .tr::before{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line)}
@@ -209,7 +212,8 @@ var RC = { crash: "var(--r-crash)", bear: "var(--r-bear)", neutral: "var(--r-neu
 var TC = { LOW: "var(--t-low)", ELEVATED: "var(--t-elevated)", HIGH: "var(--t-high)", EXTREME: "var(--t-extreme)" };
 var SIGN = { mom24: "24h momentum", mom7d: "7-day momentum", ret1h: "last-hour move", trend: "trend vs 3-day avg", breakout: "7-day range position",
   rsi: "RSI", volume: "volume surge", vol: "volatility", drawdown: "drawdown depth", liquidity: "liquidity", beta_tilt: "BTC beta × regime" };
-var S = { state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", sort: { k: "score", d: -1 },
+var TOKEN = new URLSearchParams(location.search).get("t") || "";
+var S = { outbox: [], state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", sort: { k: "score", d: -1 },
   sel: "kai", ver: "", lver: "", talk: 0, paused: false };
 var STATIC = window.CM_STATIC || null;   // set by `run.py export`: a read-only snapshot, no server
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -314,8 +318,11 @@ function headerHTML(d) {
     : hb == null ? ["bad", "scanner: never ran"] : hb < 180 ? ["good live", "scanner live · " + ago(hb)] : ["warn", "scanner idle · last tick " + ago(hb)];
   var n = (L.coins || []).filter(function (c) { return !c.warming; }).length;
   var bc = !br ? "" : br.level == 0 ? "good" : br.level == 3 ? "bad" : "warn";
-  return '<header><div><h1>Crypto Risk Board · Control Room</h1><div class="sub">24/7 scanner → HMM regime brain (BTC) → five advisors learning online → paper allocation → independent safety gate</div></div>'
-    + '<div class="pills"><span class="pill ' + (L.simulated ? "warn" : "good") + '"><i class="dot"></i>' + (L.simulated ? "SIMULATION" : "PAPER") + ' · no real orders</span>'
+  var live = s && s.mode == "live", mp = live
+    ? '<span class="pill ' + (s.live_armed ? "bad" : "warn") + '"><i class="dot"></i>LIVE · ' + esc(s.broker) + (s.live_armed ? (s.broker == "robinhood" ? " · you approve, Claude places" : " · you approve every order") : " · not armed, proposes nothing") + '</span>'
+    : '<span class="pill ' + (L.simulated ? "warn" : "good") + '"><i class="dot"></i>' + (L.simulated ? "SIMULATION" : "PAPER") + ' · no real orders</span>';
+  return '<header><div><h1>Crypto Risk Board · Control Room</h1><div class="sub">24/7 scanner → HMM regime brain (BTC) → five advisors learning online → allocation → independent safety gate → ' + (live ? "your approval → " + esc(s.broker) : "paper book") + '</div></div>'
+    + '<div class="pills">' + mp
     + '<span class="pill ' + eng[0] + '"><i class="dot"></i>' + eng[1] + '</span>'
     + '<span class="pill ' + ((L.feed_errors || []).length ? "warn" : "") + '"><i class="dot"></i>' + esc(L.feed || "feed") + " · " + n + ' coins</span>'
     + (br ? '<span class="pill ' + bc + '"><i class="dot"></i>breaker ' + br.name + " · dd " + pct(br.drawdown, 1) + '</span>' : '')
@@ -442,8 +449,10 @@ function bookHTML(s) {
   var tr = Object.keys(pos).filter(function (t) { return pos[t].value > 1 || pos[t].target_w > 0.001; }).sort(function (a, b) { return pos[b].value - pos[a].value; }).map(function (t) {
     var p = pos[t]; return '<div class="sl"><span class="mono"><b>' + esc(sym(t)) + '</b> ' + usd(p.value) + '</span><div class="bar"><i style="width:' + Math.min(100, p.w * 200) + '%"></i><u style="left:' + Math.min(99, p.target_w * 200) + '%"></u></div><span class="mono">' + pct(p.w, 1) + ' / ' + pct(p.target_w, 1) + '</span></div>';
   }).join("");
-  return '<div class="card"><h2>Paper book · actual / target (marker = target, bar scale 0–50%)</h2>' + (tr || '<div class="sub">All cash.</div>')
-    + '<div class="sub" style="margin-top:8px">The book follows the desk\'s smoothed conviction (about 12 hours), rebalancing every ' + s.guards.rebalance_every + 'h, with fees and slippage. Paper only: nothing here can reach an exchange.</div></div>';
+  var live = s.mode == "live";
+  return '<div class="card"><h2>' + (live ? esc(s.broker) + " account" : "Paper book") + ' · actual / target (marker = target, bar scale 0–50%)</h2>' + (tr || '<div class="sub">All cash.</div>')
+    + '<div class="sub" style="margin-top:8px">The book follows the desk\'s smoothed conviction (about 12 hours), proposing a rebalance every ' + s.guards.rebalance_every + 'h. '
+    + (live ? 'Every order waits for your approval.' : 'Paper only: simulated fills with fees and slippage.') + '</div></div>';
 }
 
 function guardsHTML(d) {
@@ -452,7 +461,7 @@ function guardsHTML(d) {
   function meter(frac, marks) { return '<div class="meter"><i style="width:' + Math.min(100, Math.max(0, frac * 100)) + '%"></i>' + (marks || []).map(function (m) { return '<u style="left:' + m * 100 + '%"></u>'; }).join("") + '</div>'; }
   return '<div class="card"><h2>Safety layer · deterministic, independent of the model</h2>'
     + row("Kill switch (file)", d.kill ? "ENGAGED" : "clear", d.kill ? "bad" : "good")
-    + row("Execution", "paper only (no exchange code in this build)", "good")
+    + row("Execution", s.mode == "live" ? (s.live_armed ? esc(s.broker) + " · every order needs your approval" : "live, NOT armed: nothing is proposed") : "paper (simulated fills)", s.mode == "live" ? (s.live_armed ? "warn" : "bad") : "good")
     + row("Per-trade cap", g.cap_set ? usd(g.max_per_trade) : "UNSET → all orders refused", g.cap_set ? "good" : "bad")
     + row("Drawdown vs breaker (10 / 15 / 25%)", pct(br.drawdown, 1) + " · " + br.name, br.level == 0 ? "good" : br.level == 3 ? "bad" : "warn", meter(br.drawdown / 0.3, [10 / 30, 15 / 30, 25 / 30]))
     + row("Day P&L, UTC (blocks buys at −5%)", spct(br.day_pnl, 2), br.day_pnl <= -0.05 ? "bad" : "")
@@ -463,13 +472,33 @@ function guardsHTML(d) {
     + (br.reasons.length ? '<div class="sub" style="margin-top:6px">' + br.reasons.map(esc).join("<br>") + '</div>' : '') + '</div>';
 }
 
+function outboxHTML(s) {
+  if ((!s || s.mode != "live") && !S.outbox.length) return "";
+  var now = Date.now() / 1000, open_ = S.outbox.filter(function (o) { return o.status == "pending" && o.expires_ts > now; });
+  var tot = open_.reduce(function (a, o) { return a + o.notional; }, 0), ro = !!STATIC;
+  var rows = S.outbox.slice(0, 30).map(function (o) {
+    var exp = o.expires_ts < now && (o.status == "pending" || o.status == "approved"), st = exp ? "expired" : o.status, act = "";
+    if (!ro && o.status == "pending" && !exp) act = '<button class="ok" data-oid="' + o.id + '" data-act="approve">Approve</button> <button data-oid="' + o.id + '" data-act="reject">Reject</button>';
+    else if (!ro && o.status == "approved" && !exp) act = '<button data-oid="' + o.id + '" data-act="reject">Withdraw</button>';
+    var left = (o.status == "pending" || o.status == "approved") && !exp ? ' · ' + Math.max(0, Math.round((o.expires_ts - now) / 60)) + ' min left' : '';
+    return '<tr><td class="mono">#' + o.id + '</td><td><span class="b ' + o.side + '">' + o.side + '</span></td><td><b class="mono">' + esc(sym(o.symbol)) + '</b></td><td class="r mono">' + usd(o.notional) + '</td>'
+      + '<td class="r mono">' + price(o.ref_price) + '</td><td>' + (o.verdict ? '<span class="vd ' + esc(o.verdict) + '">' + esc(o.verdict) + '</span>' : '') + '</td>'
+      + '<td><span class="st ' + st + '">' + st + left + '</span>' + (o.detail ? '<div class="sub">' + esc(o.detail) + '</div>' : '') + '</td><td style="white-space:nowrap">' + act + '</td><td class="sub">' + esc(o.reason || "") + '</td></tr>';
+  }).join("");
+  var all = !ro && open_.length > 1 ? '<button class="ok" id="apprall" data-n="' + open_.length + '" data-t="' + Math.round(tot) + '" style="float:right">Approve all ' + open_.length + ' · ' + usd(tot) + '</button>' : '';
+  var how = s && s.broker == "robinhood" ? "Approved Robinhood orders are placed by Claude: in the Claude app, say <b>place the approved crypto board orders</b>." : "Approved orders are re-checked against fresh prices (±2%), the kill switch and every safety limit, then sent as market orders.";
+  return '<div class="card ob">' + all + '<h2>Orders awaiting you · nothing is sent until you approve</h2><div class="sub" style="margin-bottom:8px">' + how + ' Unapproved proposals expire after ' + Math.round((s && s.approval_ttl_min) || 120) + ' min and are replaced by the next one.</div>'
+    + '<div class="tx"><table><tr><th>ID</th><th>Side</th><th>Coin</th><th class="r">Amount</th><th class="r">Price then</th><th>Desk</th><th>Status</th><th></th><th>Why</th></tr>' + (rows || '<tr><td colspan="9" class="sub">No proposals yet. The board proposes at each rebalance (every ' + ((s && s.guards && s.guards.rebalance_every) || 8) + 'h).</td></tr>') + '</table></div></div>';
+}
+function post(u) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN } }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) alert(j.error); S.ver = ""; poll(); }); }
+
 function tradesHTML() {
   var r = S.trades.map(function (t) { return '<tr><td class="mono">' + utc(t.ts) + '</td><td><span class="b ' + t.side + '">' + t.side + '</span></td><td><b class="mono">' + esc(sym(t.symbol)) + '</b></td><td class="r mono">' + usd(t.notional) + '</td><td class="r mono">' + price(t.price) + '</td><td class="r mono">$' + (t.fee || 0).toFixed(2) + '</td><td class="sub">' + esc(t.reason || "") + '</td></tr>'; }).join("");
-  return '<div class="card"><h2>Paper trades · newest first</h2><div class="tw"><table><tr><th>UTC</th><th>Side</th><th>Coin</th><th class="r">Notional</th><th class="r">Price</th><th class="r">Fee</th><th>Why</th></tr>' + (r || '<tr><td colspan="7" class="sub">No paper trades yet.</td></tr>') + '</table></div></div>';
+  return '<div class="card"><h2>' + (S.state.snapshot && S.state.snapshot.mode == "live" ? "Orders sent" : "Paper trades") + ' · newest first</h2><div class="tw"><table><tr><th>UTC</th><th>Side</th><th>Coin</th><th class="r">Notional</th><th class="r">Price</th><th class="r">Fee</th><th>Why</th></tr>' + (r || '<tr><td colspan="7" class="sub">No paper trades yet.</td></tr>') + '</table></div></div>';
 }
 
 function eventsHTML() {
-  var kinds = ["all", "board", "learn", "regime", "safety", "breaker", "refit", "feed", "minutes"];
+  var kinds = ["all", "outbox", "board", "learn", "regime", "safety", "breaker", "broker", "refit", "feed", "minutes"];
   var chips = kinds.map(function (k) { return '<button class="chip' + (S.evKind == k ? " on" : "") + '" data-ev="' + k + '">' + k + '</button>'; }).join("");
   var ev = S.events.filter(function (e) { return S.evKind == "all" ? e.kind != "minutes" : e.kind == S.evKind; }).slice(0, 40).map(function (e) {
     return '<div class="ev ' + e.severity + '"><div class="d">' + utc(e.ts) + ' UTC · ' + esc(e.kind) + '</div><div class="t">' + esc(e.title) + '</div><div class="m">' + esc(e.body) + '</div></div>'; }).join("");
@@ -481,7 +510,7 @@ function render(part) {
   var d = S.state, s = d && d.snapshot, L = (d && d.live) || {};
   if (!d) return;
   if (!$("#hdr")) {
-    $("#app").innerHTML = '<div id="hdr"></div><div id="top"></div><div id="rbw"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
+    $("#app").innerHTML = '<div id="hdr"></div><div id="ob"></div><div id="top"></div><div id="rbw"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
       + '<div class="foot">Analysis and simulation tool, not financial advice; decisions and risk are yours. Paper mode places no real orders. The five advisors are original characters, not real people; their lines are generated from the numbers above. Prices: Coinbase public market data (Kraken fallback), or the offline simulator when the banner says so.</div>';
   }
   $("#hdr").innerHTML = headerHTML(d);
@@ -500,6 +529,7 @@ function render(part) {
     speakInit();
   }
   $("#rbw").innerHTML = riskBoardHTML(s, L);
+  $("#ob").innerHTML = outboxHTML(s);
   $("#alw").innerHTML = alertsHTML();
   $("#gd").innerHTML = guardsHTML(d);
   $("#evs").innerHTML = eventsHTML();
@@ -514,6 +544,11 @@ function bind() {
   document.querySelectorAll("[data-ev]").forEach(function (b) { b.onclick = function () { S.evKind = b.dataset.ev; $("#evs").innerHTML = eventsHTML(); bind(); }; });
   document.querySelectorAll("[data-r]").forEach(function (b) { b.onclick = function () { S.range = +b.dataset.r; $("#prf").innerHTML = perfHTML(S.state.snapshot); $("#wts").innerHTML = weightsHTML(); bind(); }; });
   document.querySelectorAll("[data-w]").forEach(function (b) { b.onclick = function () { S.wkind = b.dataset.w; $("#wts").innerHTML = weightsHTML(); bind(); }; });
+  var aa = $("#apprall"); if (aa) aa.onclick = function () { if (confirm("Approve all " + aa.dataset.n + " proposed orders, about $" + aa.dataset.t + " in total?\nEach is re-checked against fresh prices before it is sent.")) post("/api/outbox/all/approve"); };
+  document.querySelectorAll("[data-oid]").forEach(function (b) { b.onclick = function () {
+    var o = S.outbox.find(function (x) { return x.id == b.dataset.oid; });
+    if (b.dataset.act == "approve" && !confirm("Approve #" + o.id + ": " + o.side + " " + sym(o.symbol) + " for about $" + Math.round(o.notional) + "?")) return;
+    b.disabled = true; post("/api/outbox/" + b.dataset.oid + "/" + b.dataset.act); }; });
   var p = $("#cappause"); if (p) p.onclick = function () { S.paused = !S.paused; p.textContent = S.paused ? "resume" : "pause"; if (!S.paused) say(); };
 }
 
@@ -560,7 +595,8 @@ function poll() {
     }
     var first = S.ver === "";
     S.ver = v;
-    return Promise.all([get("/api/history?limit=2000"), get("/api/trades?limit=80"), get("/api/events?limit=150"), get("/api/alerts?limit=60")]).then(function (r) {
+    return Promise.all([get("/api/history?limit=2000"), get("/api/trades?limit=80"), get("/api/events?limit=150"), get("/api/alerts?limit=60"), get("/api/outbox?limit=60")]).then(function (r) {
+      S.outbox = r[4] || [];
       var last = function (h) { return h.length ? h[h.length - 1].id : null; };
       var newSnap = first || last(r[0]) !== last(S.hist);
       S.hist = r[0]; S.trades = r[1]; S.events = r[2]; S.alerts = r[3];

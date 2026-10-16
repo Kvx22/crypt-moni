@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts REAL, kind TEXT, se
 CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY, ts REAL, symbol TEXT, kind TEXT, severity TEXT,
   title TEXT, body TEXT);
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY, created_ts REAL, expires_ts REAL, symbol TEXT, side TEXT,
+  notional REAL, ref_price REAL, reason TEXT, regime TEXT, verdict TEXT, broker TEXT, status TEXT,
+  decided_ts REAL, decided_by TEXT, executed_ts REAL, client_order_id TEXT, broker_order_id TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS ev_kind ON events(kind, id);
 """
 
@@ -121,7 +124,59 @@ class Store:
 
     def counts(self):
         q = "SELECT (SELECT COUNT(*) FROM snapshots),(SELECT COALESCE(MAX(id),0) FROM events),(SELECT COALESCE(MAX(id),0) FROM alerts),(SELECT COALESCE(MAX(id),0) FROM trades)"
-        return list(self.c.execute(q).fetchone())
+        out = list(self.c.execute(q).fetchone())
+        out.append(hash(tuple((r[0], r[1]) for r in self.c.execute("SELECT id,status FROM outbox ORDER BY id DESC LIMIT 100"))))
+        return out
+
+    # ---- outbox: proposed real orders that wait for a human --------------------------
+    def add_outbox(self, ts, expires, o, ref_price, regime, verdict, broker):
+        cur = self.c.execute("""INSERT INTO outbox(created_ts,expires_ts,symbol,side,notional,ref_price,reason,regime,verdict,broker,status)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,'pending')""",
+                             (ts, expires, o.symbol, o.side, o.notional_usd, ref_price, o.reason, regime, verdict, broker))
+        oid = cur.lastrowid
+        self.c.execute("UPDATE outbox SET client_order_id=? WHERE id=?", (f"cm-{int(ts)}-{oid}", oid))
+        self.c.commit()
+        return oid
+
+    def outbox(self, limit=100, status=None):
+        q = "SELECT * FROM outbox " + ("WHERE status=? " if status else "") + "ORDER BY id DESC LIMIT ?"
+        return [dict(r) for r in self.c.execute(q, (status, limit) if status else (limit,))]
+
+    def outbox_get(self, oid):
+        r = self.c.execute("SELECT * FROM outbox WHERE id=?", (oid,)).fetchone()
+        return dict(r) if r else None
+
+    def outbox_set(self, oid, status, ts=None, **kw):
+        sets, vals = ["status=?"], [status]
+        if status in ("approved", "rejected"):
+            sets += ["decided_ts=?"]; vals += [ts]
+        if status in ("sent", "failed", "check", "skipped"):
+            sets += ["executed_ts=?"]; vals += [ts]
+        for k in ("decided_by", "broker_order_id", "detail"):
+            if k in kw:
+                sets.append(k + "=?"); vals.append(kw[k])
+        self.c.execute(f"UPDATE outbox SET {', '.join(sets)} WHERE id=?", (*vals, oid))
+        self.c.commit()
+
+    def supersede_pending(self):
+        """A new proposal replaces every older one that hasn't been approved yet."""
+        self.c.execute("UPDATE outbox SET status='superseded', detail='replaced by a newer proposal' WHERE status='pending'")
+        self.c.commit()
+
+    def expire_outbox(self, now):
+        n = self.c.execute("UPDATE outbox SET status='expired' WHERE status IN ('pending','approved') AND expires_ts<?", (now,)).rowcount
+        self.c.commit()
+        return n
+
+    def executed_since(self, ts):
+        r = self.c.execute("SELECT COUNT(*) n, COALESCE(SUM(notional),0) t FROM outbox WHERE status='sent' AND executed_ts>=?", (ts,)).fetchone()
+        return r["n"], r["t"]
+
+    def last_sent(self):
+        out = {}
+        for r in self.c.execute("SELECT symbol, side, MAX(executed_ts) t FROM outbox WHERE status='sent' GROUP BY symbol, side"):
+            out[(r["symbol"], r["side"])] = r["t"]
+        return out
 
     def prune(self, keep_snapshots=20000, keep_rows=20000, keep_bars=3000):
         """Bounded growth for a process that never stops."""

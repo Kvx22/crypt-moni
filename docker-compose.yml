@@ -1,21 +1,23 @@
-# 24/7: three small processes sharing one data volume (SQLite + the KILL file).
-#   docker compose up -d --build      then open http://127.0.0.1:8765
+# 24/7: scanner, dashboard and watchdog as auto-restarting services on one data volume (SQLite + KILL file).
+#   docker compose up -d --build                      paper mode (config.json)
+#   CONFIG=config.coinbase.json docker compose up -d  live Coinbase, every order approved by you (see EXECUTION.md)
+x-app: &app
+  build: .
+  restart: unless-stopped
+  env_file: [{path: .env, required: false}]
+  volumes:
+    - cm-data:/app/data
+    - ./secrets:/app/secrets:ro          # the Coinbase key file lives here, read-only, never in the image
 services:
   scanner:
-    build: .
-    command: python run.py scan
-    restart: unless-stopped
-    volumes: [cm-data:/app/data]
+    <<: *app
+    command: ["python", "run.py", "scan", "--config", "${CONFIG:-config.json}"]
   dashboard:
-    build: .
-    command: python run.py dashboard --host 0.0.0.0
-    restart: unless-stopped
-    ports: ["127.0.0.1:8765:8765"]   # only reachable from this machine
-    volumes: [cm-data:/app/data]
+    <<: *app
+    command: ["python", "run.py", "dashboard", "--host", "0.0.0.0", "--config", "${CONFIG:-config.json}"]
+    ports: ["127.0.0.1:8765:8765"]       # this machine only; reach it from your phone over Tailscale
   watchdog:
-    build: .
-    command: python run.py watchdog
-    restart: unless-stopped
-    volumes: [cm-data:/app/data]
+    <<: *app
+    command: ["python", "run.py", "watchdog", "--config", "${CONFIG:-config.json}"]
 volumes:
   cm-data: {}

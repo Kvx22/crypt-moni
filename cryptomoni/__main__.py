@@ -10,6 +10,13 @@
   export    [--config F] [--out FILE]    the dashboard as one self-contained, read-only HTML snapshot
   doctor    [--config F]                 check config, data, feed and safety settings
   backtest  [--days N]                   walk-forward test of the brain + exposure board on BTC daily closes
+
+Live mode (config.coinbase.json / config.robinhood.json): the board proposes, you approve.
+  outbox                                 list proposed / approved / sent orders
+  approve ID|all, reject ID              same rules as the dashboard buttons
+  export-approved                        Robinhood: approved orders as JSON for Claude to place
+  ack ID --status sent|failed [--order-id X] [--detail TEXT]   Robinhood: record what Claude did
+  rh-snapshot --cash N --pos BTC-USD=0.01,ETH-USD=0.2         Robinhood: write the synced balances
   kill | reset-kill | reset-breaker      safety controls (only a human resets)
 """
 from __future__ import annotations
@@ -76,7 +83,14 @@ def print_board(st):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["up", "scan", "dashboard", "watchdog", "demo", "once", "status", "export", "doctor", "backtest",
-                                    "kill", "reset-kill", "reset-breaker"])
+                                    "kill", "reset-kill", "reset-breaker", "outbox", "approve", "reject",
+                                    "export-approved", "ack", "rh-snapshot"])
+    ap.add_argument("id", nargs="?", default=None)
+    ap.add_argument("--status", choices=["sent", "failed"], default=None)
+    ap.add_argument("--order-id", default="")
+    ap.add_argument("--detail", default="")
+    ap.add_argument("--cash", type=float, default=None)
+    ap.add_argument("--pos", default="")
     ap.add_argument("--config", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default=None)
@@ -108,9 +122,12 @@ def main(argv=None):
         st.kv_set("breaker", br.save())
         return print("Breaker reset; high-water mark re-based to current paper equity.")
 
+    token = os.environ.get("CM_TOKEN") or cfg.get("execution", {}).get("approve_token")
+    if a.cmd in ("outbox", "approve", "reject", "export-approved", "ack", "rh-snapshot"):
+        return live_cmds(a, cfg, kill_file)
     if a.cmd == "dashboard":
         from .dashboard import serve
-        return serve(cfg["db"], kill_file, port, host)
+        return serve(cfg["db"], kill_file, port, host, token)
     if a.cmd == "watchdog":
         from .watchdog import run
         w = cfg.get("watchdog", {})
@@ -150,12 +167,77 @@ def main(argv=None):
     scan_s = cfg.get("scan_seconds", 60)
     if a.cmd == "up":
         from .dashboard import serve
-        threading.Thread(target=serve, args=(cfg["db"], kill_file, port, host), daemon=True).start()
-    print(f"Scanning {len(eng.universe)} coins every {scan_s}s, 24/7 ({eng.feed.kind} feed, paper only). Ctrl+C to stop.", flush=True)
+        threading.Thread(target=serve, args=(cfg["db"], kill_file, port, host, token), daemon=True).start()
+    how = (f"LIVE on {eng.broker.name}: every order waits for your approval" if eng.approve else "paper only")
+    print(f"Scanning {len(eng.universe)} coins every {scan_s}s, 24/7 ({eng.feed.kind} feed, {how}). Ctrl+C to stop.", flush=True)
     try:
         eng.run_forever(scan_s)
     except KeyboardInterrupt:
         print("stopped")
+
+
+def live_cmds(a, cfg, kill_file):
+    from .safety import KillSwitch, SafetyConfig
+    from .store import Store
+    ex = cfg.get("execution", {})
+    if a.cmd == "rh-snapshot":
+        if a.cash is None:
+            return print("usage: rh-snapshot --cash 123.45 --pos BTC-USD=0.0012,ETH-USD=0.05")
+        pos = {}
+        for kv in filter(None, a.pos.split(",")):
+            k, v = kv.split("=")
+            pos[k.strip().upper()] = float(v)
+        path = ex.get("snapshot", "data/robinhood_snapshot.json")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(dict(ts=time.time(), cash=a.cash, positions=pos, source="Claude Robinhood connector"), f, indent=2)
+        return print(f"wrote {path}: cash ${a.cash:,.2f}, {len(pos)} position(s)")
+    st = Store(cfg["db"])
+    now = time.time()
+    st.expire_outbox(now)
+    if a.cmd == "outbox":
+        rows = st.outbox(60)
+        for r in reversed(rows):
+            print(f"#{r['id']:>4} {r['status']:<10} {r['side']:<4} {r['symbol']:<9} ${r['notional']:>9,.2f}  {r['verdict'] or '':<7} {r['detail'] or ''}")
+        return print("" if rows else "No proposals yet.")
+    if a.cmd in ("approve", "reject"):
+        if a.id is None:
+            return print(f"usage: {a.cmd} ID" + (" | all" if a.cmd == "approve" else ""))
+        if a.cmd == "approve" and KillSwitch(kill_file).engaged():
+            return print("refused: kill switch engaged")
+        rows = st.outbox(200, "pending") if a.id == "all" else [st.outbox_get(int(a.id))]
+        for r in rows:
+            if r is None:
+                print("no such order"); continue
+            if a.cmd == "approve" and (r["status"] != "pending" or now > r["expires_ts"]):
+                print(f"#{r['id']}: cannot approve ({r['status']})"); continue
+            if a.cmd == "reject" and r["status"] not in ("pending", "approved"):
+                print(f"#{r['id']}: cannot reject ({r['status']})"); continue
+            st.outbox_set(r["id"], "approved" if a.cmd == "approve" else "rejected", now, decided_by="cli")
+            print(f"#{r['id']} {a.cmd}d: {r['side']} {r['symbol']} ${r['notional']:,.2f}")
+        return
+    if a.cmd == "export-approved":
+        sc = SafetyConfig.from_dict(cfg.get("safety", {}))
+        killed = KillSwitch(kill_file).engaged()
+        rows = [] if killed else st.outbox(200, "approved")
+        out = [dict(outbox_id=r["id"], symbol=r["symbol"], side=r["side"], notional_usd=round(min(r["notional"], sc.max_per_trade_usd or 0), 2),
+                    ref_price=r["ref_price"], max_move=sc.price_band_pct, client_order_id=r["client_order_id"],
+                    expires_in_min=round((r["expires_ts"] - now) / 60)) for r in reversed(rows)]
+        return print(json.dumps(dict(broker=ex.get("broker"), kill_switch=killed, max_per_trade_usd=sc.max_per_trade_usd,
+                                     rule="place each only if the live price is within max_move of ref_price; then ack it",
+                                     orders=out), indent=2))
+    if a.cmd == "ack":
+        r = st.outbox_get(int(a.id)) if a.id else None
+        if not r or not a.status:
+            return print("usage: ack ID --status sent|failed [--order-id X] [--detail TEXT]")
+        if r["status"] != "approved":
+            return print(f"refused: #{r['id']} is {r['status']}, not approved")
+        st.outbox_set(r["id"], a.status, now, broker_order_id=a.order_id, detail=a.detail)
+        if a.status == "sent":
+            from .models import Fill
+            st.add_trade(Fill(r["symbol"], r["side"], r["notional"], 0, r["ref_price"], now, "sent", a.order_id), f"#{r['id']} approved, placed by Claude")
+        st.add_event(now, "outbox", "info" if a.status == "sent" else "warn", f"#{r['id']} {a.status} via Claude ({r['broker']})", a.detail or a.order_id)
+        return print(f"#{r['id']} marked {a.status}")
 
 
 def export(cfg, out):
@@ -197,8 +279,8 @@ def doctor(cfg, cfg_path, kill_file):
         print(("  OK    " if good else "  FIX   ") + what)
     print(f"config {cfg_path}")
     sc = cfg.get("safety", {})
-    line(sc.get("mode", "paper") == "paper", f"mode {sc.get('mode', 'paper')} (this build is paper-only)")
-    line(sc.get("max_per_trade_usd"), f"max_per_trade_usd = {sc.get('max_per_trade_usd')} (unset refuses every paper order)")
+    print(f"  INFO  mode {sc.get('mode', 'paper')}" + (" (simulated fills)" if sc.get("mode", "paper") == "paper" else " (real orders, each approved by you)"))
+    line(sc.get("max_per_trade_usd"), f"max_per_trade_usd = {sc.get('max_per_trade_usd')} (unset refuses every order; yours to set)")
     line(not KillSwitch(kill_file).engaged(), f"kill switch {'ENGAGED: ' + KillSwitch(kill_file).reason() if KillSwitch(kill_file).engaged() else 'clear'}")
     csvp = cfg.get("daily_csv", "data/BTC-USD.csv")
     if os.path.exists(csvp):
@@ -207,6 +289,32 @@ def doctor(cfg, cfg_path, kill_file):
         line(len(rows) > 1500, f"{csvp}: {len(rows) - 1:,} daily closes through {rows[-1].split(',')[0]} (the scanner appends new days)")
     else:
         print(f"  NOTE  {csvp} missing: the scanner will backfill BTC daily history from the feed on first start")
+    ex = cfg.get("execution", {})
+    if sc.get("mode") == "live":
+        from .safety import SafetyConfig, live_armed
+        line(sc.get("live_armed") is True, "live_armed = true in config (you set this)")
+        line(os.environ.get("CM_LIVE") == "1", "environment variable CM_LIVE=1 (second arming key)")
+        armed = live_armed(SafetyConfig.from_dict(sc))
+        print(f"  INFO  live orders {'ARMED: every order still needs your approval' if armed else 'not armed: the board proposes nothing'}")
+        if ex.get("broker") == "coinbase":
+            try:
+                from .brokers import CoinbaseBroker
+                b = CoinbaseBroker(ex.get("key_file", "secrets/cdp_api_key.json"), ex.get("quote_currency", "USD"))
+                bal, _ = b.balances()
+                held = {k: v for k, v in bal.items() if v > 0}
+                line(True, f"Coinbase key works (read-only check): {len(held)} non-zero balance(s), "
+                           f"{ex.get('quote_currency', 'USD')} {bal.get(ex.get('quote_currency', 'USD'), 0):,.2f}")
+            except Exception as e:
+                line(False, f"Coinbase API: {e}")
+        elif ex.get("broker") == "robinhood":
+            from .brokers import RobinhoodHandoff
+            rh = RobinhoodHandoff(ex.get("snapshot", "data/robinhood_snapshot.json"), ex.get("snapshot_max_age_h", 24))
+            age = rh.age()
+            line(age is not None and not rh.stale(), "Robinhood balances synced " + ("never: ask Claude to sync" if age is None else f"{age / 3600:.1f}h ago"))
+        else:
+            line(False, "execution.broker must be coinbase or robinhood in live mode")
+        print("  INFO  approval token " + ("set" if (os.environ.get("CM_TOKEN") or ex.get("approve_token")) else "not set (fine on localhost; set one before reaching the dashboard over a network)"))
+        print("  INFO  phone push " + ("on (ntfy)" if ex.get("ntfy_topic") else "off (set execution.ntfy_topic)"))
     feed = make_feed(cfg)
     try:
         p, ts = feed.ticker(cfg.get("market_proxy", "BTC-USD"))

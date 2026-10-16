@@ -1,5 +1,7 @@
-"""The 24/7 engine: scanner -> regime brain -> five learning advisors -> paper
-allocation -> SAFETY GATE -> paper broker, logging everything the dashboard shows.
+"""The 24/7 engine: scanner -> regime brain -> five learning advisors -> allocation
+-> SAFETY GATE -> paper broker, or (live mode) an outbox of proposed orders that a
+human approves before they go to Coinbase / Robinhood. Logs everything the
+dashboard shows.
 
 Three clocks, all UTC, all driven by one loop that never needs a market to open:
   every tick (default 60 s)   live prices, live risk board, alerts, heartbeat
@@ -18,13 +20,15 @@ import time
 
 import numpy as np
 
+from .brokers import RobinhoodHandoff, make_broker
 from .advisors import ADVISORS, ExposureBoard, PickDesk, learned_view, pick_minutes
 from .allocation import Allocator
 from .feeds import DAY, HOUR, FeedError
 from .models import Order
 from .paper import PaperBroker
 from .regime import REGIMES, WARMUP, RegimeTracker, features_now
-from .safety import CircuitBreaker, GateContext, KillSwitch, SafetyConfig, SafetyGate
+from .notify import push
+from .safety import CircuitBreaker, GateContext, KillSwitch, SafetyConfig, SafetyGate, live_armed
 from .scanner import MIN_BARS, alerts as scan_alerts, metrics, regime_tilt, signal_matrix
 
 
@@ -44,7 +48,7 @@ def read_daily_csv(path):
 
 
 class Engine:
-    def __init__(self, cfg, feed, store):
+    def __init__(self, cfg, feed, store, broker=None):
         self.cfg, self.feed, self.s = cfg, feed, store
         self.universe = list(cfg["universe"])
         self.proxy = cfg.get("market_proxy", "BTC-USD")
@@ -66,9 +70,21 @@ class Engine:
         if store.kv_get("desk"):
             self.desk.load(store.kv_get("desk"))
         self.alloc = Allocator(**cfg.get("allocator", {}))
-        self.broker = PaperBroker(**cfg.get("paper", {}))
-        if store.kv_get("paper"):
-            self.broker.load(store.kv_get("paper"))
+        live = broker if broker is not None else make_broker(cfg)
+        if (live is None) != (self.sc.mode == "paper"):
+            raise ValueError("config mismatch: safety.mode 'live' needs execution.broker coinbase|robinhood, "
+                             "and a live broker needs safety.mode 'live'")
+        self.approve = live is not None          # live: every order waits in the outbox for a human
+        if live is not None:
+            self.broker = live
+        else:
+            self.broker = PaperBroker(**cfg.get("paper", {}))
+            if store.kv_get("paper"):
+                self.broker.load(store.kv_get("paper"))
+        ex = cfg.get("execution", {})
+        self.ttl = ex.get("approval_ttl_min", 120) * 60
+        self.dash_url = ex.get("dashboard_url")
+        self.acct = None
         self.horizon = int(cfg.get("horizon_hours", 4))
         self.rebalance_every = int(cfg.get("rebalance_every_hours", 8))
         self.conv_alpha = 1.0 / max(1.0, cfg.get("conviction_hours", 12))
@@ -264,11 +280,12 @@ class Engine:
             # the book follows the desk's smoothed conviction, not each hour's call, to keep churn and fees down
             book = [dict(symbol=c["symbol"], score=c["conviction"], verdict=self.desk.verdict(c["conviction"], c["tier"]))
                     for c in coins]
-            weights, tnotes = self.alloc.targets(e, book, held=self.broker.account(quotes).positions)
+            weights, tnotes = self.alloc.targets(e, book, held=self.acct.positions if self.acct else {})
             notes += tnotes
             due = (bar_ts // HOUR) % self.rebalance_every == 0 or prev_e is None or bs.exposure_cap < (prev_e or 0) - 0.01
-            if due:
-                fills = self.rebalance(now, weights, quotes, bs)
+            if due and self.acct is not None:
+                verdicts = {c["symbol"]: c["verdict"] for c in book}
+                fills = self.propose(now, weights, quotes, bs, verdicts) if self.approve else self.rebalance(now, weights, quotes, bs)
                 self.s.kv_set("weights", weights, commit=False)
             self.s.kv_set("e", e)
         else:
@@ -292,13 +309,8 @@ class Engine:
             self._ev(now, "learn", "info", f"Pick desk after {rounds:,} graded hours", ws,
                      dict(drift=self.desk.drift(), learned_share=self.desk.learned_share()))
 
-    # ------------------------------------------------------------------ paper orders
-    def rebalance(self, now, weights, quotes, bs):
-        acct = self.broker.account(quotes)
-        if acct.equity <= 0:
-            return []
-        day = self.s.kv_get("day", {})
-        last_ord = {tuple(k.split("|")): v for k, v in self.s.kv_get("last_order", {}).items()}
+    # ------------------------------------------------------------------ orders
+    def plan(self, acct, weights, quotes):
         orders = []
         for sym in sorted(set(weights) | set(acct.positions)):
             if sym not in quotes:
@@ -311,9 +323,38 @@ class Engine:
             orders.append(Order(sym, side, abs(diff), "market", None,
                                 f"rebalance to {weights.get(sym, 0):.1%} (now {cur / acct.equity:.1%})"))
         orders.sort(key=lambda o: (o.side != "sell", -o.notional_usd))
-        ctx = GateContext(now=now, equity=acct.equity, cash=acct.cash,
-                          positions={k: v["value"] for k, v in acct.positions.items()}, quotes=quotes, breaker=bs,
-                          orders_today=day.get("orders", 0), turnover_today=day.get("turnover", 0.0), last_order_ts=last_ord)
+        return orders
+
+    def _ctx(self, now, acct, quotes, bs):
+        if self.approve:  # counters come from orders actually sent today
+            n, t = self.s.executed_since(day_ts(day_str(now)))
+            last = self.s.last_sent()
+        else:
+            day = self.s.kv_get("day", {})
+            n, t = day.get("orders", 0), day.get("turnover", 0.0)
+            last = {tuple(k.split("|")): v for k, v in self.s.kv_get("last_order", {}).items()}
+        return GateContext(now=now, equity=acct.equity, cash=acct.cash,
+                           positions={k: v["value"] for k, v in acct.positions.items()}, quotes=quotes, breaker=bs,
+                           orders_today=n, turnover_today=t, last_order_ts=last)
+
+    def _account(self, quotes, now):
+        try:
+            return self.broker.account(quotes)
+        except Exception as ex:  # a broker outage never stops the scanner; it only pauses trading
+            self.feed_errors.append(f"{self.broker.name} account: {str(ex)[:200]}")
+            if now - (self.s.kv_get("acct_err_ts") or 0) > 3600:
+                self._ev(now, "broker", "warn", f"Can't read the {self.broker.name} account", str(ex)[:300])
+                self.s.kv_set("acct_err_ts", now)
+            return None
+
+    def rebalance(self, now, weights, quotes, bs):
+        """Paper book: orders go straight through the gate to the paper broker."""
+        acct = self.broker.account(quotes)
+        if acct.equity <= 0:
+            return []
+        day = self.s.kv_get("day", {})
+        orders = self.plan(acct, weights, quotes)
+        ctx = self._ctx(now, acct, quotes, bs)
         out = []
         for o in orders:
             v = self.gate.check(o, ctx)
@@ -332,6 +373,78 @@ class Engine:
         self.s.kv_set("day", day, commit=False)
         self.s.kv_set("last_order", {f"{k[0]}|{k[1]}": v for k, v in ctx.last_order_ts.items()}, commit=False)
         self.s.kv_set("paper", self.broker.state())
+        return out
+
+    def propose(self, now, weights, quotes, bs, verdicts):
+        """Live: the advisors' verdict becomes a proposal. Orders that pass the gate wait for approval."""
+        if isinstance(self.broker, RobinhoodHandoff) and self.broker.stale():
+            self._ev(now, "outbox", "warn", "No proposal: Robinhood balances are stale",
+                     "Ask Claude to sync the Robinhood crypto board so data/robinhood_snapshot.json is fresh.")
+            return []
+        acct = self.broker.account(quotes)
+        if acct.equity <= 0:
+            return []
+        self.s.supersede_pending()
+        ctx = self._ctx(now, acct, quotes, bs)
+        regime = REGIMES[self.brain["regime"]] if "regime" in self.brain else "n/a"
+        made = []
+        for o in self.plan(acct, weights, quotes):
+            v = self.gate.check(o, ctx)
+            if not v.ok:
+                self._ev(now, "safety", "warn", f"Not proposed: {o.side} {o.symbol} ${o.notional_usd:,.0f}", "; ".join(v.reasons), o.d())
+                continue
+            SafetyGate.commit(v, ctx)
+            oid = self.s.add_outbox(now, now + self.ttl, v.order, quotes[o.symbol][0], regime,
+                                    verdicts.get(o.symbol, ""), self.broker.name)
+            made.append(dict(id=oid, symbol=o.symbol, side=o.side, notional_usd=v.order.notional_usd, status="pending"))
+        if made:
+            lines = [f"#{m['id']} {m['side']} {m['symbol'].split('-')[0]} ${m['notional_usd']:,.0f}" for m in made]
+            self._ev(now, "outbox", "info", f"{len(made)} order(s) await your approval ({self.broker.name})",
+                     "; ".join(lines) + f". They expire in {self.ttl / 60:.0f} min.")
+            push(self.cfg, f"Crypto Risk Board: {len(made)} order(s) to approve", "\n".join(lines), self.dash_url)
+        return made
+
+    def execute_approved(self, now, quotes, bs):
+        """Send what a human approved, after fresh checks. Never anything else."""
+        self.s.expire_outbox(now)
+        if not self.broker.can_execute:
+            return []  # Robinhood: a Claude session places approved orders (export-approved / ack)
+        rows = sorted(self.s.outbox(200, "approved"), key=lambda r: (r["side"] != "sell", r["id"]))
+        if not rows:
+            return []
+        acct = self.broker.account(quotes)
+        ctx = self._ctx(now, acct, quotes, bs)
+        out = []
+        for r in rows:
+            q = quotes.get(r["symbol"])
+            if q is None:
+                continue  # no fresh price this tick; try again next tick (until it expires)
+            move = q[0] / r["ref_price"] - 1
+            if abs(move) > self.sc.price_band_pct:
+                self.s.outbox_set(r["id"], "skipped", now, detail=f"price moved {move:+.1%} since proposal (limit ±{self.sc.price_band_pct:.0%})")
+                self._ev(now, "outbox", "warn", f"Skipped #{r['id']} {r['side']} {r['symbol']}", f"price moved {move:+.1%} since it was proposed")
+                continue
+            o = Order(r["symbol"], r["side"], r["notional"], "market", None, r["reason"])
+            v = self.gate.check(o, ctx)
+            if not v.ok:
+                self.s.outbox_set(r["id"], "skipped", now, detail="; ".join(v.reasons)[:300])
+                self._ev(now, "outbox", "warn", f"Skipped #{r['id']} {r['side']} {r['symbol']}", "; ".join(v.reasons))
+                continue
+            SafetyGate.commit(v, ctx)
+            try:
+                f = self.broker.place(v.order, quotes, now, r["client_order_id"])
+            except Exception as ex:  # unknown outcome: never resend automatically
+                self.s.outbox_set(r["id"], "check", now, detail=f"send failed or outcome unknown, check {self.broker.name} before retrying: {str(ex)[:200]}")
+                self._ev(now, "outbox", "critical", f"Order #{r['id']} outcome unknown", str(ex)[:300])
+                continue
+            if f.status == "sent":
+                self.s.outbox_set(r["id"], "sent", now, broker_order_id=f.detail)
+                self.s.add_trade(f, f"#{r['id']} approved: {r['reason']}")
+                self._ev(now, "outbox", "info", f"Sent #{r['id']} {f.side} {f.symbol} ${f.notional_usd:,.2f}", f"{self.broker.name} order {f.detail}")
+            else:
+                self.s.outbox_set(r["id"], "failed", now, detail=f.detail)
+                self._ev(now, "outbox", "warn", f"{self.broker.name} rejected #{r['id']} {f.symbol}", f.detail)
+            out.append(f.__dict__)
         return out
 
     # ------------------------------------------------------------------ the tick
@@ -355,26 +468,28 @@ class Engine:
         bars = {s: self.s.get_bars(s, HOUR, 400) for s in self.universe}
         quotes = self.quotes(now, bars)
 
-        # breaker on paper equity, every tick
-        acct = self.broker.account(quotes)
+        # breaker on book equity (paper or the real account), every tick
+        acct = self.acct = self._account(quotes, now)
         date = day_str(now)
         day = self.s.kv_get("day", {})
         new_day = day.get("date") != date
-        if new_day:
+        if new_day and acct is not None:
             day = dict(date=date, open=acct.equity, orders=0, turnover=0.0)
             self.s.kv_set("day", day, commit=False)
         old = self.breaker.level
-        bs = self.breaker.update(acct.equity, day["open"], new_day)
+        bs = self.breaker.update(acct.equity if acct else self.breaker.hwm, day.get("open", 0), new_day and acct is not None)
         self.s.kv_set("breaker", self.breaker.save(), commit=False)
         if bs.level != old:
             self._ev(now, "breaker", "critical" if bs.level >= 2 else "warn",
                      f"Circuit breaker {self.breaker.NAMES[old]} -> {bs.name}", "; ".join(bs.reasons), dict(drawdown=bs.drawdown))
         killed = self.kill.engaged()
         if killed and not self.s.kv_get("kill_noted"):
-            self._ev(now, "safety", "critical", "KILL SWITCH engaged: no paper orders", self.kill.reason())
+            self._ev(now, "safety", "critical", "KILL SWITCH engaged: no orders", self.kill.reason())
         self.s.kv_set("kill_noted", killed, commit=False)
 
         self.brain_step(now)
+        if self.approve and acct is not None:
+            self.execute_approved(now, quotes, bs)
         live_btc = quotes.get(self.proxy, (None,))[0]
 
         # hourly: a new bar closed for the market proxy
@@ -418,7 +533,8 @@ class Engine:
                                    simulated=self.feed.simulated, feed_errors=self.feed_errors[:6]))
 
     def snapshot(self, now, quotes, bs, desk):
-        acct = self.broker.account(quotes)
+        from .models import Account
+        acct = self._account(quotes, now) or self.acct or Account(0.0, 0.0, {})
         b, dec = self.brain, self.brain.get("dec")
         weights = self.s.kv_get("weights", {})
         invested = sum(p["value"] for p in acct.positions.values())
@@ -443,8 +559,12 @@ class Engine:
         self._ev(now, "minutes", "info", "Desk calls",
                  "; ".join(f"{a['name'].split()[0]}: {a['pick'].split('-')[0]}" for a in advisors), dict(lines=mins))
         g = self.s.kv_get("day", {})
+        if self.approve:
+            n, t = self.s.executed_since(day_ts(day_str(now)))
+            g = dict(orders=n, turnover=t)
         snap = dict(
-            ts=now, mode="paper", feed=self.feed.kind, simulated=self.feed.simulated,
+            ts=now, mode=self.sc.mode, broker=self.broker.name, feed=self.feed.kind, simulated=self.feed.simulated,
+            live_armed=live_armed(self.sc), approval_ttl_min=self.ttl / 60,
             equity=acct.equity, cash=acct.cash, bench=quotes.get(self.proxy, (None,))[0], fees=self.broker.fees_paid,
             e_target=desk["e"], e_actual=invested / acct.equity if acct.equity else 0.0,
             regime=REGIMES[b["regime"]] if "regime" in b else "n/a", confidence=b.get("conf", 0.0),

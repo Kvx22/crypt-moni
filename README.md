@@ -26,8 +26,10 @@ Coinbase (Kraken fallback) ─► SCANNER: 12 coins, every 60 s, 24/7
 everything ─► SQLite ─► Control Room dashboard at http://127.0.0.1:8765
 ```
 
-**It never places a real order.** There is no exchange-trading code in this project: the only broker is a paper
-broker, and the safety gate refuses every mode except `paper`. It reads public market data only (no API keys).
+**Paper by default.** Out of the box it trades a paper book only. **Live mode** (see [EXECUTION.md](EXECUTION.md))
+turns the advisors' verdict into real orders on Coinbase or your Robinhood agentic account, and **every order waits
+for your approval** in the dashboard, on your phone, or in the terminal. There is no auto-approve. Live mode also needs
+two arming keys (a config flag and an environment variable) and a per-trade cap you set yourself.
 
 ## Quick start
 
@@ -35,7 +37,7 @@ Python 3.10+ and numpy. From inside the `crypt-moni` folder (Windows: use `py` i
 
 ```bash
 pip install -r requirements.txt
-python -m unittest discover -s tests          # 30 tests, ~10 s
+python -m unittest discover -s tests          # 35 tests, ~40 s
 
 # See it work offline first: three weeks of SIMULATED market in ~45 s
 python run.py demo
@@ -52,6 +54,13 @@ at the next closed hourly bar.
 
 Watch it learn in fast-forward: `python run.py up --config config.sim.json` runs the simulator at one market hour
 every 2 seconds with the dashboard open on port 8766.
+
+### Trade it for real, with your approval
+
+Read [EXECUTION.md](EXECUTION.md). The short version: Coinbase connects through its official API and sends what you
+approve within a minute, day or night; Robinhood's agentic account is only reachable through Claude's connector, so
+approved Robinhood orders wait for a Claude session. For a true 24/7 setup: Coinbase, on an always-on machine,
+dashboard on your phone over Tailscale, push notifications from ntfy when the board wants your approval.
 
 ### Run it 24/7
 
@@ -76,6 +85,8 @@ If you put the dashboard on a server, keep it behind SSH tunnelling or a VPN: it
 | `doctor` | config, data, feed reachability, safety settings |
 | `backtest [--days N]` | walk-forward test of brain + exposure board on BTC daily closes |
 | `kill`, `reset-kill`, `reset-breaker` | safety controls. Only a human resets |
+| `outbox`, `approve ID\|all`, `reject ID` | live mode: review and decide proposed orders from the terminal |
+| `export-approved`, `ack`, `rh-snapshot` | live Robinhood: the hand-off Claude uses (EXECUTION.md) |
 
 ## The five advisors
 
@@ -142,7 +153,8 @@ Rebalances every 8 h, 40 bp fee + 5 bp slippage.
 
 | Guard | Behaviour |
 |---|---|
-| Paper only | any mode except `paper` is refused; there is no exchange-order code to reach |
+| Human approval | live orders only leave the outbox after you approve them; approved orders are re-checked (price within ±2% of the proposal, every guard below) before sending; unapproved ones expire after 2 h |
+| Two arming keys | live mode needs `safety.live_armed: true` AND env `CM_LIVE=1`; otherwise nothing is proposed |
 | Kill switch | the `data/KILL` file. Dashboard button, watchdog, `run.py kill`, or 5 consecutive engine errors create it; only `reset-kill` clears it |
 | Per-trade cap | unset ⇒ every order refused; over-cap orders clamped (or rejected) |
 | Circuit breaker | drawdown from a slowly decaying high-water mark: 10% → cap 60% · 15% → cap 30% · 25% → HALT (sells only, latched until `reset-breaker`); day loss ≥ 5% (UTC) blocks buys |

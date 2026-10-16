@@ -99,11 +99,23 @@ class TestSafety(unittest.TestCase):
         self.cfg.max_per_trade_usd = None
         self.assertFalse(self.gate.check(Order("BTC-USD", "buy", 100), self.ctx()).ok)
 
-    def test_only_paper_mode(self):
+    def test_live_mode_needs_both_arming_keys(self):
         self.cfg.mode = "live"
+        os.environ.pop("CM_LIVE", None)
+        self.cfg.live_armed = True
         v = self.gate.check(Order("BTC-USD", "buy", 100), self.ctx())
         self.assertFalse(v.ok)
-        self.assertIn("paper-only", v.reasons[0])
+        self.assertIn("not armed", v.reasons[0])
+        os.environ["CM_LIVE"] = "1"
+        try:
+            self.cfg.live_armed = False
+            self.assertFalse(self.gate.check(Order("BTC-USD", "buy", 100), self.ctx()).ok)
+            self.cfg.live_armed = True
+            self.assertTrue(self.gate.check(Order("BTC-USD", "buy", 100), self.ctx()).ok)
+        finally:
+            os.environ.pop("CM_LIVE")
+        self.cfg.mode = "margin"
+        self.assertFalse(self.gate.check(Order("BTC-USD", "buy", 100), self.ctx()).ok)
 
     def test_kill_switch_blocks(self):
         KillSwitch(self.cfg.kill_file).trip("test")
@@ -351,3 +363,150 @@ class TestEngineEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeCoinbase:
+    """Stands in for coinbase.rest.RESTClient: same method names and response shapes."""
+
+    def __init__(self, feed, usd=1000.0):
+        self.feed, self.bal, self.calls = feed, {"USD": usd}, []
+
+    def get_accounts(self, limit=None):
+        return {"accounts": [{"currency": k, "available_balance": {"value": str(v)}, "hold": {"value": "0"}} for k, v in self.bal.items()]}
+
+    def get_product(self, pid):
+        return {"product_id": pid, "base_increment": "0.00000001", "quote_increment": "0.01", "quote_min_size": "1", "base_min_size": "0.00000001"}
+
+    def market_order_buy(self, client_order_id, product_id, quote_size):
+        base = product_id.split("-")[0]
+        px = self.feed.bars[base + "-USD"][-1].close
+        self.bal["USD"] -= float(quote_size)
+        self.bal[base] = self.bal.get(base, 0.0) + float(quote_size) * 0.994 / px
+        self.calls.append(("buy", client_order_id, product_id, quote_size))
+        return {"success": True, "success_response": {"order_id": f"cb-{len(self.calls)}"}}
+
+    def market_order_sell(self, client_order_id, product_id, base_size):
+        base = product_id.split("-")[0]
+        px = self.feed.bars[base + "-USD"][-1].close
+        self.bal[base] -= float(base_size)
+        self.bal["USD"] += float(base_size) * px * 0.994
+        self.calls.append(("sell", client_order_id, product_id, base_size))
+        return {"success": True, "success_response": {"order_id": f"cb-{len(self.calls)}"}}
+
+
+class TestLiveApproval(unittest.TestCase):
+    """Live mode: the board proposes, nothing is sent until a human approves, then fresh checks."""
+
+    def setUp(self):
+        from cryptomoni.__main__ import load_cfg
+        from cryptomoni.brokers import CoinbaseBroker
+        from cryptomoni.engine import Engine
+        from cryptomoni.store import Store
+        self.dir = tempfile.mkdtemp()
+        cfg = load_cfg(os.path.join(ROOT, "config.coinbase.json"))
+        cfg.update(db=os.path.join(self.dir, "live.db"), daily_csv=os.path.join(ROOT, "data", "BTC-USD.csv"), warmup_days=30)
+        cfg["safety"].update(kill_file=os.path.join(self.dir, "KILL"), live_armed=True, max_per_trade_usd=400)
+        cfg["tracker"] = dict(n_init=1, n_iter=30)
+        cfg["execution"]["snapshot"] = os.path.join(self.dir, "rh.json")
+        self.cfg = cfg
+        os.environ["CM_LIVE"] = "1"
+        last = list(BTC)[-1]
+        # the simulator's clock starts at the real time, so wall-clock approval expiry lines up
+        self.feed = SimFeed(cfg["universe"], start_ts=time.time() - 1800, anchors={"BTC-USD": BTC[last]}, step=60)
+        self.cb = FakeCoinbase(self.feed)
+        self.store = Store(cfg["db"])
+        self.eng = Engine(cfg, self.feed, self.store, broker=CoinbaseBroker(client=self.cb, cache_s=0))
+        for _ in range(62):   # one-minute ticks: the first hourly bar closes inside this
+            self.eng.tick()
+
+    def tearDown(self):
+        os.environ.pop("CM_LIVE", None)
+        self.store.close()
+        shutil.rmtree(self.dir)
+
+    def post(self, path, headers=None):
+        from http.server import ThreadingHTTPServer
+        from cryptomoni.dashboard import make_handler
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.cfg["db"], self.cfg["safety"]["kill_file"], "s3cret"))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", method="POST", headers=headers or {})
+            try:
+                with urllib.request.urlopen(req) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+        finally:
+            srv.shutdown()
+
+    def test_nothing_sent_without_approval(self):
+        pend = self.store.outbox(100, "pending")
+        self.assertTrue(pend, "the board should have proposed orders")
+        for _ in range(30):
+            self.eng.tick()
+        self.assertEqual(self.cb.calls, [])
+
+    def test_approve_then_send_with_fresh_checks(self):
+        pend = self.store.outbox(100, "pending")
+        ok = {"X-CM": "1", "X-CM-Token": "s3cret"}
+        self.assertEqual(self.post(f"/api/outbox/{pend[0]['id']}/approve", {"X-CM": "1"}), 403)   # token required
+        self.assertEqual(self.post("/api/outbox/all/approve", ok), 200)
+        # one order's price "moved" 5% since it was proposed: it must be skipped, not sent
+        moved = pend[-1]["id"]
+        self.store.c.execute("UPDATE outbox SET ref_price=ref_price*1.05 WHERE id=?", (moved,)); self.store.c.commit()
+        self.eng.tick()
+        sent = [r for r in self.store.outbox(100) if r["status"] == "sent"]
+        self.assertTrue(sent)
+        self.assertEqual(len(self.cb.calls), len(sent))
+        self.assertEqual({c[1] for c in self.cb.calls}, {r["client_order_id"] for r in sent})
+        self.assertEqual(self.store.outbox_get(moved)["status"], "skipped")
+        self.assertTrue(all(float(c[3]) <= 400 for c in self.cb.calls if c[0] == "buy"))  # per-trade cap held
+
+    def test_kill_switch_blocks_approval_and_sending(self):
+        pend = self.store.outbox(100, "pending")
+        ok = {"X-CM": "1", "X-CM-Token": "s3cret"}
+        self.assertEqual(self.post(f"/api/outbox/{pend[0]['id']}/approve", ok), 200)
+        KillSwitch(self.cfg["safety"]["kill_file"]).trip("test")
+        self.assertEqual(self.post(f"/api/outbox/{pend[1]['id']}/approve", ok), 409)
+        self.eng.tick()
+        self.assertEqual(self.cb.calls, [])
+        self.assertEqual(self.store.outbox_get(pend[0]["id"])["status"], "skipped")
+
+    def test_expired_orders_never_send(self):
+        self.store.c.execute("UPDATE outbox SET status='approved', expires_ts=0"); self.store.c.commit()
+        self.eng.tick()
+        self.assertEqual(self.cb.calls, [])
+
+    def test_robinhood_handoff(self):
+        from cryptomoni.__main__ import main
+        from cryptomoni.brokers import RobinhoodHandoff
+        from cryptomoni.engine import Engine
+        from cryptomoni.store import Store
+        cfg = json.loads(json.dumps(self.cfg))
+        cfg.update(db=os.path.join(self.dir, "rh.db"))
+        cfg["execution"].update(broker="robinhood")
+        rh = RobinhoodHandoff(cfg["execution"]["snapshot"])
+        st = Store(cfg["db"])
+        try:
+            eng = Engine(cfg, self.feed, st, broker=rh)
+            for _ in range(65):
+                eng.tick()
+            self.assertFalse(st.outbox(10))                       # no synced balances: no proposal
+            self.assertIn("stale", st.events(20, "outbox")[0]["title"])
+            with open(cfg["execution"]["snapshot"], "w") as f:
+                json.dump(dict(ts=time.time(), cash=500.0, positions={}), f)
+            st.kv_set("e", None)                                  # next bar proposes
+            for _ in range(61):
+                eng.tick()
+            pend = st.outbox(100, "pending")
+            self.assertTrue(pend)
+            st.outbox_set(pend[0]["id"], "approved", time.time(), decided_by="test")
+            eng.tick()
+            self.assertEqual(st.outbox_get(pend[0]["id"])["status"], "approved")   # Python never places Robinhood orders
+            cfgp = os.path.join(self.dir, "rh.json.cfg")
+            with open(cfgp, "w") as f:
+                json.dump(cfg, f)
+            main(["ack", str(pend[0]["id"]), "--config", cfgp, "--status", "sent", "--order-id", "rh-1"])
+            self.assertEqual(st.outbox_get(pend[0]["id"])["status"], "sent")
+        finally:
+            st.close()

@@ -1,0 +1,3 @@
+# Only for live mode on Coinbase (config.coinbase.json): Coinbase's official Advanced Trade SDK
+-r requirements.txt
+coinbase-advanced-py>=1.8
