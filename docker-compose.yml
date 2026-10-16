@@ -1,0 +1,21 @@
+# 24/7: three small processes sharing one data volume (SQLite + the KILL file).
+#   docker compose up -d --build      then open http://127.0.0.1:8765
+services:
+  scanner:
+    build: .
+    command: python run.py scan
+    restart: unless-stopped
+    volumes: [cm-data:/app/data]
+  dashboard:
+    build: .
+    command: python run.py dashboard --host 0.0.0.0
+    restart: unless-stopped
+    ports: ["127.0.0.1:8765:8765"]   # only reachable from this machine
+    volumes: [cm-data:/app/data]
+  watchdog:
+    build: .
+    command: python run.py watchdog
+    restart: unless-stopped
+    volumes: [cm-data:/app/data]
+volumes:
+  cm-data: {}

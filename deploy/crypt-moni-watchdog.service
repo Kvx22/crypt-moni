@@ -1,0 +1,13 @@
+[Unit]
+Description=Crypto Risk Board watchdog (trips the kill switch if the scanner goes silent)
+After=crypt-moni.service
+
+[Service]
+WorkingDirectory=/opt/crypt-moni
+ExecStart=/usr/bin/python3 run.py watchdog
+Restart=always
+RestartSec=30
+User=cryptomoni
+
+[Install]
+WantedBy=multi-user.target

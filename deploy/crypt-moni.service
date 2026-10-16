@@ -1,0 +1,18 @@
+# Linux 24/7 with systemd:
+#   sudo cp -r crypt-moni /opt/ && sudo useradd -r cryptomoni && sudo chown -R cryptomoni /opt/crypt-moni
+#   sudo cp deploy/crypt-moni*.service /etc/systemd/system/
+#   sudo systemctl enable --now crypt-moni crypt-moni-watchdog
+[Unit]
+Description=Crypto Risk Board: 24/7 scanner + dashboard (paper only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/crypt-moni
+ExecStart=/usr/bin/python3 run.py up
+Restart=always
+RestartSec=10
+User=cryptomoni
+
+[Install]
+WantedBy=multi-user.target
