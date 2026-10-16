@@ -7,6 +7,7 @@
   demo      [--hours N]                  offline simulation (invented data), N simulated hours, fast
   once      [--config F]                 one scan tick, then print the board
   status    [--config F]                 print the latest board from the database
+  export    [--config F] [--out FILE]    the dashboard as one self-contained, read-only HTML snapshot
   doctor    [--config F]                 check config, data, feed and safety settings
   backtest  [--days N]                   walk-forward test of the brain + exposure board on BTC daily closes
   kill | reset-kill | reset-breaker      safety controls (only a human resets)
@@ -74,7 +75,7 @@ def print_board(st):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["up", "scan", "dashboard", "watchdog", "demo", "once", "status", "doctor", "backtest",
+    ap.add_argument("cmd", choices=["up", "scan", "dashboard", "watchdog", "demo", "once", "status", "export", "doctor", "backtest",
                                     "kill", "reset-kill", "reset-breaker"])
     ap.add_argument("--config", default=None)
     ap.add_argument("--port", type=int, default=None)
@@ -82,6 +83,7 @@ def main(argv=None):
     ap.add_argument("--hours", type=int, default=24 * 21)
     ap.add_argument("--days", type=int, default=1095)
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--out", default="crypto-risk-board.html")
     a = ap.parse_args(argv)
     cfg_path = a.config or ("config.sim.json" if a.cmd == "demo" else "config.json")
     cfg = load_cfg(cfg_path)
@@ -116,6 +118,8 @@ def main(argv=None):
     if a.cmd == "status":
         from .store import Store
         return print_board(Store(cfg["db"]))
+    if a.cmd == "export":
+        return export(cfg, a.out)
     if a.cmd == "doctor":
         return doctor(cfg, cfg_path, kill_file)
     if a.cmd == "backtest":
@@ -152,6 +156,34 @@ def main(argv=None):
         eng.run_forever(scan_s)
     except KeyboardInterrupt:
         print("stopped")
+
+
+def export(cfg, out):
+    """Bake the latest board into one HTML page (no server, nothing it can change)."""
+    import re
+    from .dashboard import STATIC
+    from .store import Store
+    if not os.path.exists(cfg["db"]):
+        return print(f"No database at {cfg['db']}: run the scanner (or `demo`) first.")
+    st = Store(cfg["db"], readonly=True)
+    if not st.latest():
+        return print("No board yet: the scanner needs a closed hourly bar and a week of history.")
+    events = st.events(150)
+    for e in events:
+        e["payload"] = None
+    data = dict(state=dict(snapshot=st.latest(), live=st.kv_get("live"), heartbeat_age=None, kill=False,
+                           kill_reason="", version=st.counts()),
+                history=st.history(2000), trades=st.trades(80), events=events, alerts=st.alerts(60))
+    with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    style = re.search(r"<style>.*?</style>", html, re.S).group(0)
+    body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
+    blob = json.dumps(data, separators=(",", ":"), default=float).replace("</", "<\\/")
+    page = ('<title>Crypto Risk Board</title>\n<meta name="claude:viewport-fit-sides" content="cover">\n'
+            + style + "\n<script>window.CM_STATIC=" + blob + ";</script>\n" + body)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(page)
+    print(f"wrote {out} ({len(page) / 1024:,.0f} KB): a read-only snapshot of the board")
 
 
 def doctor(cfg, cfg_path, kill_file):

@@ -327,6 +327,16 @@ class TestEngineEndToEnd(unittest.TestCase):
         finally:
             srv.shutdown()
 
+    def test_export_snapshot(self):
+        from cryptomoni.__main__ import export
+        out = os.path.join(self.dir, "board.html")
+        export(self.cfg, out)
+        with open(out, encoding="utf-8") as f:
+            page = f.read()
+        self.assertIn("window.CM_STATIC=", page)
+        self.assertNotIn("<!doctype", page.lower())
+        self.assertEqual(page.count("</script>"), 2)  # data never closes the script tag early
+
     def test_watchdog_trips_on_stale_heartbeat(self):
         from cryptomoni.store import Store
         from cryptomoni.watchdog import check

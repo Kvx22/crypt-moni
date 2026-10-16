@@ -31,7 +31,7 @@
 *{box-sizing:border-box}
 html{background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:18px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left))}
+  padding-block:18px 40px;padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
 .wrap{max-width:1400px;margin:0 auto}
 h1{font-size:22px;margin:0;letter-spacing:-.01em} h2{font-size:12px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
@@ -211,6 +211,7 @@ var SIGN = { mom24: "24h momentum", mom7d: "7-day momentum", ret1h: "last-hour m
   rsi: "RSI", volume: "volume surge", vol: "volatility", drawdown: "drawdown depth", liquidity: "liquidity", beta_tilt: "BTC beta × regime" };
 var S = { state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", sort: { k: "score", d: -1 },
   sel: "kai", ver: "", lver: "", talk: 0, paused: false };
+var STATIC = window.CM_STATIC || null;   // set by `run.py export`: a read-only snapshot, no server
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 var $ = function (s, r) { return (r || document).querySelector(s); };
 var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); };
@@ -309,7 +310,8 @@ function spark(v) {
 /* ---------- panels ---------- */
 function headerHTML(d) {
   var s = d.snapshot, L = d.live || {}, hb = d.heartbeat_age, br = s ? s.breaker : null;
-  var eng = hb == null ? ["bad", "scanner: never ran"] : hb < 180 ? ["good live", "scanner live · " + ago(hb)] : ["warn", "scanner idle · last tick " + ago(hb)];
+  var eng = STATIC ? ["", "read-only snapshot · " + (L.ts ? utc(L.ts) + " UTC" : "–")]
+    : hb == null ? ["bad", "scanner: never ran"] : hb < 180 ? ["good live", "scanner live · " + ago(hb)] : ["warn", "scanner idle · last tick " + ago(hb)];
   var n = (L.coins || []).filter(function (c) { return !c.warming; }).length;
   var bc = !br ? "" : br.level == 0 ? "good" : br.level == 3 ? "bad" : "warn";
   return '<header><div><h1>Crypto Risk Board · Control Room</h1><div class="sub">24/7 scanner → HMM regime brain (BTC) → five advisors learning online → paper allocation → independent safety gate</div></div>'
@@ -317,9 +319,10 @@ function headerHTML(d) {
     + '<span class="pill ' + eng[0] + '"><i class="dot"></i>' + eng[1] + '</span>'
     + '<span class="pill ' + ((L.feed_errors || []).length ? "warn" : "") + '"><i class="dot"></i>' + esc(L.feed || "feed") + " · " + n + ' coins</span>'
     + (br ? '<span class="pill ' + bc + '"><i class="dot"></i>breaker ' + br.name + " · dd " + pct(br.drawdown, 1) + '</span>' : '')
-    + (d.kill ? '<span class="pill bad"><i class="dot"></i>KILL SWITCH ENGAGED</span>' : '<button class="kill" id="killbtn">⏻ Kill switch</button>')
+    + (d.kill ? '<span class="pill bad"><i class="dot"></i>KILL SWITCH ENGAGED</span>' : STATIC ? '' : '<button class="kill" id="killbtn">⏻ Kill switch</button>')
     + '</div></header>'
-    + (L.simulated ? '<div class="banner">Simulation: these prices are invented by the offline simulator (the brain is seeded with real BTC history). Run <span class="mono">python run.py up</span> for the live Coinbase feed.</div>' : '')
+    + (STATIC ? '<div class="banner">Read-only snapshot of the board' + (L.simulated ? ' after a simulated run: coin prices and the dates after Oct 15, 2026 come from the offline simulator. The regime brain was trained on real BTC history up to that date.' : '.') + ' The live board runs on your machine with <span class="mono">python run.py up</span>.</div>'
+      : L.simulated ? '<div class="banner">Simulation: these prices are invented by the offline simulator (the brain is seeded with real BTC history). Run <span class="mono">python run.py up</span> for the live Coinbase feed.</div>' : '')
     + ((L.feed_errors || []).length ? '<div class="banner">Feed trouble: ' + esc(L.feed_errors.slice(0, 2).join(" · ")) + '</div>' : '');
 }
 
@@ -541,7 +544,10 @@ function say() {
 }
 
 /* ---------- data ---------- */
-function get(u) { return fetch(u, { cache: "no-store" }).then(function (r) { return r.json(); }); }
+function get(u) {
+  if (STATIC) return Promise.resolve(STATIC[u.split("?")[0].replace("/api/", "")]);
+  return fetch(u, { cache: "no-store" }).then(function (r) { return r.json(); });
+}
 function poll() {
   get("/api/state").then(function (d) {
     if (d.error) { $("#app").innerHTML = '<div class="empty">' + esc(d.error) + '</div>'; return; }
@@ -562,5 +568,5 @@ function poll() {
     });
   }).catch(function (e) { $("#app").innerHTML = '<div class="empty">Cannot reach the dashboard server: ' + esc(e) + '</div>'; });
 }
-poll(); setInterval(poll, 2000);
+poll(); if (!STATIC) setInterval(poll, 2000);
 </script></body></html>

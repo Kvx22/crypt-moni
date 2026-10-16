@@ -35,7 +35,7 @@ Python 3.10+ and numpy. From inside the `crypt-moni` folder (Windows: use `py` i
 
 ```bash
 pip install -r requirements.txt
-python -m unittest discover -s tests          # 29 tests, ~10 s
+python -m unittest discover -s tests          # 30 tests, ~10 s
 
 # See it work offline first: three weeks of SIMULATED market in ~45 s
 python run.py demo
@@ -72,6 +72,7 @@ If you put the dashboard on a server, keep it behind SSH tunnelling or a VPN: it
 | `scan` / `dashboard` / `watchdog` | the three pieces separately (what Docker runs) |
 | `demo [--hours N]` | offline simulation into `data/sim.db` |
 | `once`, `status` | one tick and print the board / print the latest board |
+| `export [--out FILE]` | the dashboard as one self-contained, read-only HTML snapshot you can share |
 | `doctor` | config, data, feed reachability, safety settings |
 | `backtest [--days N]` | walk-forward test of brain + exposure board on BTC daily closes |
 | `kill`, `reset-kill`, `reset-breaker` | safety controls. Only a human resets |
