@@ -22,23 +22,31 @@ FEATURES = ["ret1", "logvol10", "ret30", "dd365", "ext200"]
 _HEALTH_COLS = (2, 3)  # ret30, dd365
 WARMUP = 365
 
+# Feature windows per market. Crypto never closes (calendar days, sqrt(365), wide clip);
+# stocks use trading days (sqrt(252), the original Risk Board's SPY features).
+PROFILES = {
+    "crypto": dict(warmup=365, ann=365, ret_win=30, hi_win=365, ext_win=200, clip=0.15, vol_floor=0.10),
+    "stock": dict(warmup=252, ann=252, ret_win=21, hi_win=252, ext_win=200, clip=0.08, vol_floor=0.02),
+}
 
-def make_features(close, start: int = 0) -> np.ndarray:
-    """Feature matrix aligned to `close`; rows before WARMUP (or `start`) are NaN.
+
+def make_features(close, start: int = 0, profile: str = "crypto") -> np.ndarray:
+    """Feature matrix aligned to `close`; rows before the warm-up (or `start`) are NaN.
     Row t only uses closes up to t, so the matrix is causal row by row."""
+    P = PROFILES[profile]
     c = np.asarray(close, dtype=float)
     n = len(c)
     lr = np.full(n, np.nan)
     lr[1:] = np.diff(np.log(c))
     X = np.full((n, len(FEATURES)), np.nan)
-    for t in range(max(WARMUP, start), n):
+    for t in range(max(P["warmup"], start), n):
         w = lr[t - 9 : t + 1]
-        vol = max(np.std(w, ddof=1) * np.sqrt(365), 0.10)
-        X[t, 0] = np.clip(lr[t], -0.15, 0.15)
+        vol = max(np.std(w, ddof=1) * np.sqrt(P["ann"]), P["vol_floor"])
+        X[t, 0] = np.clip(lr[t], -P["clip"], P["clip"])
         X[t, 1] = np.log(vol)
-        X[t, 2] = np.log(c[t] / c[t - 30])
-        X[t, 3] = np.log(c[t] / c[t - 364 : t + 1].max())
-        X[t, 4] = np.log(c[t] / c[t - 199 : t + 1].mean())
+        X[t, 2] = np.log(c[t] / c[t - P["ret_win"]])
+        X[t, 3] = np.log(c[t] / c[t - (P["hi_win"] - 1) : t + 1].max())
+        X[t, 4] = np.log(c[t] / c[t - (P["ext_win"] - 1) : t + 1].mean())
     return X
 
 
@@ -180,7 +188,8 @@ class RegimeTracker:
     intraday read between daily closes."""
 
     def __init__(self, refit_every=90, min_train=1095, max_train=2800, switch_prob=0.55,
-                 switch_confirm=2, seed=0, filter_window=900, n_init=4, n_iter=80):
+                 switch_confirm=2, seed=0, filter_window=900, n_init=4, n_iter=80, profile="crypto"):
+        self.profile, self.warmup = profile, PROFILES[profile]["warmup"]
         self.refit_every, self.min_train, self.max_train = refit_every, min_train, max_train
         self.switch_prob, self.switch_confirm, self.seed = switch_prob, switch_confirm, seed
         self.filter_window, self.n_init, self.n_iter = filter_window, n_init, n_iter
@@ -191,7 +200,7 @@ class RegimeTracker:
         self.fit_count = 0
 
     def ready(self, n):
-        return n - WARMUP >= self.min_train or self.model is not None
+        return n - self.warmup >= self.min_train or self.model is not None
 
     def _fit(self, valid, n):
         self.model = HMM().fit(valid[-self.max_train:], n_init=self.n_init, n_iter=self.n_iter,
@@ -209,7 +218,7 @@ class RegimeTracker:
         n = len(close)
         refit = self.model is None or n - self.last_fit_n >= self.refit_every
         # between refits only the filter window is needed, so skip the older rows
-        valid = make_features(close, start=0 if refit else n - self.filter_window)[WARMUP:]
+        valid = make_features(close, start=0 if refit else n - self.filter_window, profile=self.profile)[self.warmup:]
         if refit:
             if len(valid) < self.min_train:
                 return None
@@ -235,7 +244,7 @@ class RegimeTracker:
         if self.model is None:
             return None
         close = np.asarray(close, float)
-        valid = make_features(close, start=len(close) - self.filter_window - 1)[WARMUP:]
+        valid = make_features(close, start=len(close) - self.filter_window - 1, profile=self.profile)[self.warmup:]
         valid = valid[~np.isnan(valid).any(1)]
         alpha, nxt = self._read(valid)
         return dict(probs=alpha, next_probs=nxt, regime=self.regime, raw_regime=int(alpha.argmax()),
@@ -251,8 +260,8 @@ class RegimeTracker:
         self._pending, self._pending_n, self.fit_count = s["pending"], s["pending_n"], s["fit_count"]
 
 
-def features_now(close):
+def features_now(close, profile="crypto"):
     """Latest feature row in plain words, for the dashboard."""
-    x = make_features(np.asarray(close, float), start=len(close) - 1)[-1]
+    x = make_features(np.asarray(close, float), start=len(close) - 1, profile=profile)[-1]
     return dict(ret1=float(np.expm1(x[0])), vol10=float(np.exp(x[1])), ret30=float(np.expm1(x[2])),
                 dd365=float(np.expm1(x[3])), ext200=float(np.expm1(x[4])))

@@ -23,13 +23,14 @@ import numpy as np
 from .brokers import RobinhoodHandoff, make_broker
 from .advisors import ADVISORS, ExposureBoard, PickDesk, learned_view, pick_minutes
 from .allocation import Allocator
-from .feeds import DAY, HOUR, FeedError
+from .feeds import DAY, ET, HOUR, FeedError
 from .models import Order
 from .paper import PaperBroker
 from .regime import REGIMES, WARMUP, RegimeTracker, features_now
 from .notify import push
 from .safety import CircuitBreaker, GateContext, KillSwitch, SafetyConfig, SafetyGate, live_armed
 from .scanner import MIN_BARS, alerts as scan_alerts, metrics, regime_tilt, signal_matrix
+from .stocks import StockBook
 
 
 def day_str(ts):
@@ -55,8 +56,10 @@ class Engine:
         if self.proxy not in self.universe:
             self.universe.insert(0, self.proxy)
         self.sc = SafetyConfig.from_dict(cfg.get("safety", {}))
+        self.stocks = StockBook(cfg, store, feed, self._ev) if cfg.get("stocks") else None
+        self.stock_set = set(self.stocks.symbols) if self.stocks else set()
         if not self.sc.allowlist:
-            self.sc.allowlist = list(self.universe)
+            self.sc.allowlist = list(self.universe) + sorted(self.stock_set)
         self.kill = KillSwitch(self.sc.kill_file)
         self.gate = SafetyGate(self.sc, self.kill)
         self.breaker = CircuitBreaker(self.sc, store.kv_get("breaker"))
@@ -74,6 +77,8 @@ class Engine:
         if (live is None) != (self.sc.mode == "paper"):
             raise ValueError("config mismatch: safety.mode 'live' needs execution.broker coinbase|robinhood, "
                              "and a live broker needs safety.mode 'live'")
+        if self.stocks and live is not None and live.name == "coinbase":
+            raise ValueError("stocks can't trade on Coinbase: use config.robinhood.json (or paper mode) for the stock book")
         self.approve = live is not None          # live: every order waits in the outbox for a human
         if live is not None:
             self.broker = live
@@ -282,11 +287,15 @@ class Engine:
                     for c in coins]
             weights, tnotes = self.alloc.targets(e, book, held=self.acct.positions if self.acct else {})
             notes += tnotes
+            if self.stocks:   # the crypto book only gets its share of the account
+                weights = {k: v * (1 - self.stocks.share) for k, v in weights.items()}
+            self.s.kv_set("weights_crypto", weights, commit=False)
+            self.s.kv_set("verdicts_crypto", {c["symbol"]: c["verdict"] for c in book}, commit=False)
+            merged = self.merged_weights()
+            self.s.kv_set("weights", merged, commit=False)
             due = (bar_ts // HOUR) % self.rebalance_every == 0 or prev_e is None or bs.exposure_cap < (prev_e or 0) - 0.01
             if due and self.acct is not None:
-                verdicts = {c["symbol"]: c["verdict"] for c in book}
-                fills = self.propose(now, weights, quotes, bs, verdicts) if self.approve else self.rebalance(now, weights, quotes, bs)
-                self.s.kv_set("weights", weights, commit=False)
+                fills = self.send_book(now, merged, quotes, bs)
             self.s.kv_set("e", e)
         else:
             e = 0.0
@@ -294,6 +303,37 @@ class Engine:
         regime_name = REGIMES[self.brain["regime"]].upper() if "regime" in self.brain else "WARMING UP"
         picks = pick_minutes(self.desk, X, syms, mets, regime_name, S)
         return dict(syms=syms, mets=mets, coins=coins, X=X, S=S, picks=picks, notes=notes, fills=fills, e=e, graded=graded)
+
+    # ------------------------------------------------------------------ crypto + stock books together
+    def merged_weights(self):
+        w = dict(self.s.kv_get("weights_crypto", {}))
+        w.update(self.s.kv_get("stock_weights", {}))
+        return w
+
+    def merged_verdicts(self):
+        v = dict(self.s.kv_get("verdicts_crypto", {}))
+        v.update(self.s.kv_get("stock_verdicts", {}))
+        return v
+
+    def send_book(self, now, weights, quotes, bs):
+        """Paper: straight through the gate. Live: into the approval outbox."""
+        if self.approve:
+            return self.propose(now, weights, quotes, bs, self.merged_verdicts())
+        return self.rebalance(now, weights, quotes, bs)
+
+    def stock_tick(self, now, quotes, bs):
+        """Daily: the stock brain and desk read the completed day. Each trading morning (from
+        `propose_at` ET, market open): propose the combined book once."""
+        res = self.stocks.step(now, bs.exposure_cap, self.acct.positions if self.acct else {})
+        if res:
+            self.s.kv_set("stock_verdicts", res["verdicts"], commit=False)
+            self.s.kv_set("weights", self.merged_weights(), commit=False)
+        et = dt.datetime.fromtimestamp(now, ET)
+        if (self.acct is not None and self.feed.market_open(self.stocks.proxy) and self.s.kv_get("stock_weights")
+                and self.stocks.propose_due(et.time(), et.date().isoformat())):
+            self.s.kv_set("stock_proposed", et.date().isoformat())
+            self.send_book(now, self.merged_weights(), quotes, bs)
+        return res
 
     def _learn_events(self, now, graded):
         rounds = self.desk.rounds
@@ -315,6 +355,8 @@ class Engine:
         for sym in sorted(set(weights) | set(acct.positions)):
             if sym not in quotes:
                 continue
+            if sym in self.stock_set and not self.feed.market_open(sym):
+                continue   # stocks only trade in the session
             cur = acct.positions.get(sym, {}).get("value", 0.0)
             diff = weights.get(sym, 0.0) * acct.equity - cur
             if abs(diff) < max(self.min_trade, self.band * acct.equity):
@@ -467,6 +509,10 @@ class Engine:
             self.feed_errors.append(f"daily {self.proxy}: {e}")
         bars = {s: self.s.get_bars(s, HOUR, 400) for s in self.universe}
         quotes = self.quotes(now, bars)
+        if self.stocks:
+            self.stocks.sync(now)
+            quotes.update(self.stocks.quotes(now))
+            self.feed_errors += self.stocks.errors
 
         # breaker on book equity (paper or the real account), every tick
         acct = self.acct = self._account(quotes, now)
@@ -488,6 +534,8 @@ class Engine:
         self.s.kv_set("kill_noted", killed, commit=False)
 
         self.brain_step(now)
+        if self.stocks:
+            self.stock_tick(now, quotes, bs)
         if self.approve and acct is not None:
             self.execute_approved(now, quotes, bs)
         live_btc = quotes.get(self.proxy, (None,))[0]
@@ -511,14 +559,8 @@ class Engine:
         prev_m = {c["symbol"]: c for c in prev.get("coins", [])}
         last_alert = self.s.kv_get("alert_last", {})
         coins = []
-        for sym in self.universe:
-            b = bars.get(sym, [])
-            q = quotes.get(sym)
-            m = metrics(b, btc, q[0] if q else None) if len(b) >= MIN_BARS else None
-            if m is None:
-                coins.append(dict(symbol=sym, warming=True, bars=len(b)))
-                continue
-            m["symbol"], m["quote_age"] = sym, (now - q[1]) if q else None
+
+        def alerts_for(sym, m):
             p = prev_m.get(sym)
             for kind, sev, title, body in scan_alerts(sym, m, p if p and not p.get("warming") else None):
                 key = f"{sym}|{kind}"
@@ -526,11 +568,28 @@ class Engine:
                 if now - last_alert.get(key, -1e18) >= cool:
                     self.s.add_alert(now, sym, kind, sev, title, body)
                     last_alert[key] = now
+
+        for sym in self.universe:
+            b = bars.get(sym, [])
+            q = quotes.get(sym)
+            m = metrics(b, btc, q[0] if q else None) if len(b) >= MIN_BARS else None
+            if m is None:
+                coins.append(dict(symbol=sym, warming=True, bars=len(b)))
+                continue
+            m["symbol"], m["quote_age"], m["asset"] = sym, (now - q[1]) if q else None, "crypto"
+            alerts_for(sym, m)
             coins.append(m)
+        if self.stocks:
+            open_ = self.feed.market_open(self.stocks.proxy)
+            for m in self.stocks.live(now, quotes):
+                if not m.get("warming") and open_:
+                    alerts_for(m["symbol"], m)   # alerts only while the market is open
+                coins.append(m)
         self.s.kv_set("alert_last", last_alert, commit=False)
         lb = self.live_brain(live_btc)
         self.s.kv_set("live", dict(ts=now, coins=coins, brain=lb, feed=getattr(self.feed, "last_source", None) or self.feed.kind,
-                                   simulated=self.feed.simulated, feed_errors=self.feed_errors[:6]))
+                                   simulated=self.feed.simulated, feed_errors=self.feed_errors[:6],
+                                   stock_market_open=self.feed.market_open(self.stocks.proxy) if self.stocks else None))
 
     def snapshot(self, now, quotes, bs, desk):
         from .models import Account
@@ -551,11 +610,23 @@ class Engine:
                 learned_share=share[i], drift=drift[i], pick=lead_lines[a.key]["pick"], avoid=lead_lines[a.key]["avoid"],
                 pick_line=lead_lines[a.key]["text"], board_line=exp_lines.get(a.key, {}).get("text", ""),
                 learned=learned_view(self.desk, i)))
+        sview = self.stocks.view() if self.stocks else None
+        if sview:
+            sw = {a["key"]: a for a in sview["advisors"]}
+            for a in advisors:
+                x = sw[a["key"]]
+                a.update(stock_vote=x["vote"], stock_stance=x["stance"], stock_desk_weight=x["desk_weight"], stock_board_weight=x["board_weight"],
+                         stock_ic=x["ic"], stock_hit=x["hit"], stock_learned_share=x["learned_share"], stock_drift=x["drift"],
+                         stock_learned=learned_view(self.stocks.desk, ADVISORS.index(next(q for q in ADVISORS if q.key == a["key"]))))
         mins = []
         for a in advisors:
             if a["board_line"]:
                 mins.append(dict(key=a["key"], name=a["name"], stance=a["stance"], text=a["board_line"]))
             mins.append(dict(key=a["key"], name=a["name"], stance="pick", text=a["pick_line"]))
+        slast = self.s.kv_get("stock_last") if self.stocks else None
+        if slast:
+            for l in slast["picks"]:
+                mins.append(dict(key=l["key"], name=l["name"], stance="pick", text="(stocks) " + l["text"]))
         self._ev(now, "minutes", "info", "Desk calls",
                  "; ".join(f"{a['name'].split()[0]}: {a['pick'].split('-')[0]}" for a in advisors), dict(lines=mins))
         g = self.s.kv_get("day", {})
@@ -566,7 +637,8 @@ class Engine:
             ts=now, mode=self.sc.mode, broker=self.broker.name, feed=self.feed.kind, simulated=self.feed.simulated,
             live_armed=live_armed(self.sc), approval_ttl_min=self.ttl / 60,
             equity=acct.equity, cash=acct.cash, bench=quotes.get(self.proxy, (None,))[0], fees=self.broker.fees_paid,
-            e_target=desk["e"], e_actual=invested / acct.equity if acct.equity else 0.0,
+            e_target=desk["e"] * (1 - self.stocks.share) + (self.s.kv_get("stock_e") or 0.0) * self.stocks.share if self.stocks else desk["e"],
+            e_actual=invested / acct.equity if acct.equity else 0.0,
             regime=REGIMES[b["regime"]] if "regime" in b else "n/a", confidence=b.get("conf", 0.0),
             probs=b.get("probs", [0.2] * 5), next_probs=b.get("next_probs", [0.2] * 5), entropy=b.get("entropy"),
             brain_date=b.get("date"), regime_hist=b.get("hist", [])[-60:], features=b.get("features"),
@@ -575,7 +647,9 @@ class Engine:
             board=dict(raw=dec["raw"], chair_ceiling=dec["chair_ceiling"], dissent=dec["dissent"], board=dec["board"],
                        chair_capped=dec["chair_capped"], learned=dec["learned"], trust=dec["learned_trust"]) if dec else {},
             desk=dict(rounds=self.desk.rounds, horizon=self.horizon, n_obs=self.desk.n_obs),
-            coins=desk["coins"], notes=desk["notes"],
+            coins=[dict(c, asset="crypto") for c in desk["coins"]] + (slast["coins"] if slast else []),
+            notes=desk["notes"] + ([f"stocks: {n}" for n in slast["notes"]] if slast else []),
+            stocks=sview, stock_market_open=self.feed.market_open(self.stocks.proxy) if self.stocks else None,
             positions={s: dict(value=acct.positions.get(s, {}).get("value", 0.0),
                                w=acct.positions.get(s, {}).get("value", 0.0) / acct.equity if acct.equity else 0.0,
                                target_w=weights.get(s, 0.0)) for s in sorted(set(acct.positions) | set(weights))},

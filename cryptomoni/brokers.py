@@ -156,7 +156,9 @@ class RobinhoodHandoff:
         for sym, qty in (s.get("positions") or {}).items():
             if sym in quotes and float(qty) > 0:
                 pos[sym] = dict(qty=float(qty), price=quotes[sym][0], value=float(qty) * quotes[sym][0], available=float(qty))
-        return Account(cash + sum(p["value"] for p in pos.values()), cash, pos)
+        # holdings outside the board's universe (other stocks you own) count toward equity but are never traded
+        other = float(s.get("other_value", 0.0))
+        return Account(cash + other + sum(p["value"] for p in pos.values()), cash, pos)
 
     def stale(self):
         a = self.age()

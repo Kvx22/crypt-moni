@@ -94,12 +94,13 @@ def metrics(bars, btc_bars=None, live_price=None):
     return m
 
 
-def risk_score(m):
-    """0-100, higher = riskier. Fixed weights; returns (score, tier, top drivers)."""
+def risk_score(m, vol_lo=0.35, vol_span=1.25, dd_span=0.35):
+    """0-100, higher = riskier. Fixed weights; returns (score, tier, top drivers).
+    The defaults are crypto-sized; stocks pass tighter ones (volatility 12% to 57%, drawdown 25%)."""
     liq = math.log10(max(m["usd_vol_24h"], 1.0))
     parts = {
-        "volatility": (0.30, np.clip((m["vol_24h"] - 0.35) / 1.25, 0, 1)),
-        "drawdown": (0.20, np.clip(-m["dd"] / 0.35, 0, 1)),
+        "volatility": (0.30, np.clip((m["vol_24h"] - vol_lo) / vol_span, 0, 1)),
+        "drawdown": (0.20, np.clip(-m["dd"] / dd_span, 0, 1)),
         "vol expanding": (0.15, np.clip((m["vol_ratio"] - 1) / 1.5, 0, 1)),
         "tail moves": (0.15, np.clip((m["tail"] - 3) / 5, 0, 1)),
         "thin liquidity": (0.10, np.clip((7.5 - liq) / 2.5, 0, 1)),

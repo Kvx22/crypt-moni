@@ -24,6 +24,7 @@ A send whose outcome is unknown (network cut mid-request) is marked *check* and 
 | When approved orders go out | Within a minute, any hour, while you sleep | When you next ask Claude to place them |
 | Balances | Read live from the API every minute | As of Claude's last sync (proposals stop when older than 24 h) |
 | Real-time drawdown breaker | Yes, on the real account | Only as fresh as the last sync |
+| Stocks | No (Coinbase is crypto only) | Yes: a stock sleeve on its own daily clock, market hours only |
 
 **The 24/7 setup:** Coinbase on an always-on machine (mini PC, Raspberry Pi 5, or a small VPS) running Docker, the
 dashboard reachable from your phone over Tailscale, and a phone push from ntfy when orders need you. Keep Robinhood
@@ -58,21 +59,46 @@ as a second board you run with Claude when you want it.
 To stop everything at once: the dashboard's Kill switch button, or `python run.py kill`. Only
 `python run.py reset-kill` clears it.
 
-## Robinhood setup
+## Robinhood setup (crypto and stocks)
+
+The Robinhood board trades **both**: the same 12 coins as the crypto board, plus a stock sleeve of liquid ETFs
+(default: SPY, IBIT, GLD, XLE, XLV, GDX, COPX, ITA, URA, VTIP; edit `stocks.symbols` in `config.robinhood.json`).
+Stocks run on their own clock and brain, and stock orders only go out while the US market is open:
+
+| | Crypto | Stocks |
+|---|---|---|
+| Data | Coinbase public candles (Kraken fallback), every minute | Yahoo Finance daily bars and quotes (unofficial, free, no key) |
+| Clock | 24/7, hourly desk | 9:30-16:00 ET Mon-Fri, one decision per completed trading day |
+| Regime brain | bitcoin | SPY |
+| Advisors | crypto desk + crypto exposure board | a separate stock desk + stock exposure board (they learn stocks and coins separately) |
+| Share of the account | 60% | 40% (`stocks.share`) |
+| Proposals | every 8 h | once each trading morning from 10:00 ET, together with any crypto changes |
+
+Stock orders are plain dollar-amount market orders on liquid ETFs and large caps. Micro-caps and limit-only
+names are not supported. If you hold other stocks in the account that are not in `stocks.symbols`, the board counts
+their value toward your equity but never trades them.
 
 1. In the Robinhood app, keep **trade approvals on** for the agentic account if you want a second confirmation per order.
-2. In `config.robinhood.json`: set `safety.max_per_trade_usd`, `safety.live_armed: true`; set `CM_LIVE=1`.
-3. Run it beside (or instead of) Coinbase: `python run.py up --config config.robinhood.json` (dashboard on port 8767).
-4. **Sync** (ask Claude, in Claude Code on the same machine): "sync the Robinhood crypto board". Claude reads the
-   agentic account's crypto holdings and buying power with the Robinhood connector and writes them with
-   `python run.py rh-snapshot --config config.robinhood.json --cash <buying power> --pos BTC-USD=<qty>,ETH-USD=<qty>`.
-5. Approve in the dashboard as usual.
-6. **Place** (ask Claude): "place the approved crypto board orders". Claude must, for each order in
+2. In `config.robinhood.json`: set `safety.max_per_trade_usd`, `safety.live_armed: true`, and decide `stocks.share`
+   (set it to `0` or delete the `stocks` block for a crypto-only board). Set `CM_LIVE=1` in `.env`.
+3. `python run.py doctor --config config.robinhood.json` (it also checks Yahoo Finance and tells you if the market is open).
+4. Run it: `python run.py up --config config.robinhood.json` (dashboard on port 8767).
+5. **Sync** (ask Claude, in Claude Code on the same machine): "sync the Robinhood board". Claude reads the agentic
+   account's buying power, crypto holdings and stock positions with the Robinhood connector, and writes them with
+   `python run.py rh-snapshot --config config.robinhood.json --cash <buying power> --pos BTC-USD=<qty>,SPY=<shares>,... --other <market value of holdings outside the board's list>`.
+   Do this daily, and before you approve anything. Proposals stop when the snapshot is older than 24 h.
+6. Approve in the dashboard as usual.
+7. **Place** (ask Claude): "place the approved Robinhood board orders". Claude must, for each order in
    `python run.py export-approved --config config.robinhood.json`:
    - stop if `kill_switch` is true or `orders` is empty;
-   - get a fresh quote (`get_crypto_quotes`) and skip the order if the price moved more than `max_move` from `ref_price`;
-   - preview, then place it with `place_crypto_order` for `notional_usd` on the agentic account (Robinhood's own
-     trade approval may ask you again in the app);
+   - for a **stock**: only while the US market is open (9:30-16:00 ET, not a holiday); otherwise leave it approved
+     and say so, since it expires after 2 hours. Get a fresh quote (`get_equity_quotes`), skip it if the price moved
+     more than `max_move` from `ref_price`, run `review_equity_order`, then place a dollar-amount market order for
+     `notional_usd` with `place_equity_order` on the agentic account. If the stock can't be bought by dollar amount
+     (not fractional), skip it and ack it as failed with that reason;
+   - for a **coin**: get a fresh quote (`get_crypto_quotes`), skip it if the price moved more than `max_move`,
+     preview, then `place_crypto_order` for `notional_usd`;
+   - Robinhood's own trade approval may ask you again in the app;
    - record the result: `python run.py ack <outbox_id> --config config.robinhood.json --status sent --order-id <id>`
      (or `--status failed --detail "<reason>"`).
    Never place anything that is not in that list.

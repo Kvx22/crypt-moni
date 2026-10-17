@@ -70,7 +70,8 @@ class Store:
 
     # ---- history the dashboard draws ----------------------------------------
     def add_snapshot(self, s):
-        lite = dict(probs=s["probs"], desk_w=[a["desk_weight"] for a in s["advisors"]],
+        lite = dict(probs=s["probs"], stock_w=[a.get("stock_desk_weight") for a in s["advisors"]] if s.get("stocks") else None,
+                    desk_w=[a["desk_weight"] for a in s["advisors"]],
                     board_w=[a["board_weight"] for a in s["advisors"]], ic=[a["ic"] for a in s["advisors"]],
                     votes=[a["vote"] for a in s["advisors"]])
         self.c.execute("INSERT INTO snapshots(ts,equity,bench,e_target,e_actual,regime,conf,lite,data) VALUES(?,?,?,?,?,?,?,?,?)",

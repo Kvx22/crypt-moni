@@ -213,7 +213,7 @@ var TC = { LOW: "var(--t-low)", ELEVATED: "var(--t-elevated)", HIGH: "var(--t-hi
 var SIGN = { mom24: "24h momentum", mom7d: "7-day momentum", ret1h: "last-hour move", trend: "trend vs 3-day avg", breakout: "7-day range position",
   rsi: "RSI", volume: "volume surge", vol: "volatility", drawdown: "drawdown depth", liquidity: "liquidity", beta_tilt: "BTC beta × regime" };
 var TOKEN = new URLSearchParams(location.search).get("t") || "";
-var S = { outbox: [], state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", sort: { k: "score", d: -1 },
+var S = { outbox: [], state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", asset: "all", lkind: "crypto", sort: { k: "score", d: -1 },
   sel: "kai", ver: "", lver: "", talk: 0, paused: false };
 var STATIC = window.CM_STATIC || null;   // set by `run.py export`: a read-only snapshot, no server
 var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -290,8 +290,10 @@ function perfChart(h) {
 }
 
 function wChart(h) {
+  if (S.wkind === "stock") h = h.filter(function (r) { return r.stock_w; });   // only snapshots taken since the stock book started
   var n = h.length; if (n < 2) return '<div class="empty">Collecting hourly snapshots…</div>';
-  var key = S.wkind === "desk" ? "desk_w" : "board_w", hi = 0;
+  var key = S.wkind === "desk" ? "desk_w" : S.wkind === "stock" ? "stock_w" : "board_w", hi = 0;
+  if (S.wkind === "stock" && n < 2) return '<div class="empty">The stock desk has not scored enough days yet.</div>';
   h.forEach(function (r) { (r[key] || []).forEach(function (w) { hi = Math.max(hi, w); }); }); hi = Math.max(0.3, Math.ceil(hi * 20) / 20);
   var X = xs(n), H = 170, Y = yscale(0, hi, 8, H - 16);
   var o = '<svg viewBox="0 0 ' + CW + ' ' + (H + 22) + '" width="100%" role="img" aria-label="Advisor voting weight over time">' + grid(0, hi, Y, function (v) { return Math.round(v * 100) + "%"; }, 3)
@@ -325,6 +327,7 @@ function headerHTML(d) {
     + '<div class="pills">' + mp
     + '<span class="pill ' + eng[0] + '"><i class="dot"></i>' + eng[1] + '</span>'
     + '<span class="pill ' + ((L.feed_errors || []).length ? "warn" : "") + '"><i class="dot"></i>' + esc(L.feed || "feed") + " · " + n + ' coins</span>'
+    + (L.stock_market_open != null ? '<span class="pill ' + (L.stock_market_open ? "good" : "") + '"><i class="dot"></i>US stocks ' + (L.stock_market_open ? "open" : "closed") + '</span>' : '')
     + (br ? '<span class="pill ' + bc + '"><i class="dot"></i>breaker ' + br.name + " · dd " + pct(br.drawdown, 1) + '</span>' : '')
     + (d.kill ? '<span class="pill bad"><i class="dot"></i>KILL SWITCH ENGAGED</span>' : STATIC ? '' : '<button class="kill" id="killbtn">⏻ Kill switch</button>')
     + '</div></header>'
@@ -344,11 +347,19 @@ function regimeHTML(s, L) {
   var hist = s.regime_hist || [];
   var strip = hist.length ? '<h2 style="margin-top:14px">Last ' + hist.length + ' daily closes</h2><div class="strip">' + hist.map(function (x) { return '<i style="background:' + RC[REG[x[1]]] + ';opacity:' + (0.45 + 0.55 * x[2]).toFixed(2) + '" title="' + x[0] + ': ' + REG[x[1]] + ' ' + Math.round(x[2] * 100) + '%"></i>'; }).join("") + '</div><div class="row sub"><span>' + hist[0][0] + '</span><span>' + hist[hist.length - 1][0] + '</span></div>' : "";
   var f = s.features, feat = f ? '<div class="feat"><div><b class="' + cls(f.ret30) + '">' + spct(f.ret30) + '</b><span>BTC 30-day return</span></div><div><b class="dn">' + spct(f.dd365) + '</b><span>below 365-day high</span></div><div><b class="' + cls(f.ext200) + '">' + spct(f.ext200) + '</b><span>vs 200-day average</span></div><div><b>' + pct(f.vol10) + '</b><span>10-day volatility</span></div></div>' : "";
+  var sb = s.stocks, stk = "";
+  if (sb) {
+    var sk = sb.probs.indexOf(Math.max.apply(0, sb.probs)), sf = sb.features;
+    stk = '<h2 style="margin-top:16px">Stock market brain · same model on ' + esc(sb.proxy) + ' · ' + pct(sb.share) + ' of the account</h2>'
+      + '<div class="reg-big"><span class="reg-name" style="font-size:24px;color:' + RC[sb.regime] + '">' + sb.regime + '</span><span class="sub">' + pct(sb.confidence) + ' confident · close ' + esc(sb.date) + ' · stock board votes ' + pct(sb.board) + ' invested</span></div>'
+      + '<div class="pbar" role="img" aria-label="Stock regime probabilities">' + sb.probs.map(function (v, i) { return '<div style="flex:' + Math.max(v, 0.004) + ';background:' + RC[REG[i]] + '">' + (v > 0.08 ? Math.round(v * 100) + "%" : "") + '</div>'; }).join("") + '</div>'
+      + (sf ? '<div class="sub">' + esc(sb.proxy) + ' 21-day ' + spct(sf.ret30) + ' · ' + spct(sf.dd365) + ' from its 252-day high · ' + spct(sf.ext200) + ' vs 200-day average</div>' : '');
+  }
   return '<div class="card"><h2>Regime brain · hidden Markov model on BTC</h2>'
     + '<div class="reg-big"><span class="reg-name" style="color:' + RC[r] + '">' + r + '</span><span class="sub">' + pct(s.confidence) + ' confident · uncertainty ' + unc + ' · daily close ' + esc(s.brain_date || "–") + '</span></div>'
     + '<div class="pbar" role="img" aria-label="Regime probabilities">' + bar + '</div><div class="plabels">' + lab + '</div>' + live
     + '<h2 style="margin-top:14px">Tomorrow (transition matrix × today)</h2>' + fc + strip + feat
-    + '<div class="sub" style="margin-top:10px">Five clusters fitted on BTC return, volatility, trend, drawdown and stretch, named worst→best. Refits every 90 days, warm start; ' + (s.refits || 0) + ' fits so far.</div></div>';
+    + '<div class="sub" style="margin-top:10px">Five clusters fitted on BTC return, volatility, trend, drawdown and stretch, named worst→best. Refits every 90 days, warm start; ' + (s.refits || 0) + ' fits so far.</div>' + stk + '</div>';
 }
 
 var MOOD = { cut: "worried", add: "amused", hold: "calm" };
@@ -387,14 +398,17 @@ var COLS = [["symbol", "Coin"], ["price", "Price", "r"], ["ret_1h", "1h", "r", "
 var VORD = { BUY: 4, WATCH: 3, NEUTRAL: 2, AVOID: 1, VETOED: 0 };
 function riskBoardHTML(s, L) {
   var dec = {}; (s ? s.coins : []).forEach(function (c) { dec[c.symbol] = c; });
-  var rows = (L.coins || []).map(function (m) { var c = dec[m.symbol] || {}; return Object.assign({}, m, { score: c.score, verdict: c.verdict, votes: c.votes, conviction: c.conviction }); });
+  var all = (L.coins || []).map(function (m) { var c = dec[m.symbol] || {}; return Object.assign({}, m, { score: c.score, verdict: c.verdict, votes: c.votes, conviction: c.conviction }); });
+  var nStk = all.filter(function (m) { return m.asset == "stock"; }).length;
+  var rows = S.asset == "all" ? all : all.filter(function (m) { return (m.asset == "stock") == (S.asset == "stock"); });
   var k = S.sort.k, d = S.sort.d;
   rows.sort(function (a, b) { if (a.warming || b.warming) return (a.warming ? 1 : 0) - (b.warming ? 1 : 0); var x = k == "verdict" ? VORD[a.verdict] : a[k], y = k == "verdict" ? VORD[b.verdict] : b[k]; if (k == "symbol") return d * String(x).localeCompare(String(y)); return d * ((x == null ? -1e9 : x) - (y == null ? -1e9 : y)); });
   var head = COLS.map(function (c) { return '<th' + (c[0] ? ' data-k="' + c[0] + '" tabindex="0"' : '') + (c[3] ? ' title="' + c[3] + '"' : '') + ' class="' + (c[2] || "") + (c[0] == k ? " on" : "") + '">' + c[1] + (c[0] == k ? (d > 0 ? " ▲" : " ▼") : "") + '</th>'; }).join("");
   var body = rows.map(function (m) {
-    if (m.warming) return '<tr><td class="coin"><b>' + esc(sym(m.symbol)) + '</b></td><td colspan="14" class="sub">warming up: ' + m.bars + ' of 170 hourly bars</td></tr>';
+    var stock = m.asset == "stock", tag = stock ? ' <span class="sig">stock</span>' : '';
+    if (m.warming) return '<tr><td class="coin"><b>' + esc(sym(m.symbol)) + '</b>' + tag + '</td><td colspan="14" class="sub">warming up: ' + m.bars + ' of ' + (stock ? 130 + ' daily' : 170 + ' hourly') + ' bars</td></tr>';
     var votes = m.votes ? '<span class="vt">' + ORDER.map(function (kk) { var v = m.votes[kk]; return '<i class="' + v + '" style="--c:' + ADV[kk].color + '" title="' + ADV[kk].name + ': ' + ({ y: "likes it", n: "against", a: "no strong view" }[v]) + '"></i>'; }).join("") + '</span>' : '<span class="sub">–</span>';
-    return '<tr data-s="' + esc(m.symbol) + '"><td class="coin"><b>' + esc(sym(m.symbol)) + '</b></td><td class="r mono">' + price(m.price) + '</td>'
+    return '<tr data-s="' + esc(m.symbol) + '"><td class="coin"><b>' + esc(sym(m.symbol)) + '</b>' + tag + '</td><td class="r mono">' + price(m.price) + (stock && L.stock_market_open === false ? ' <span class="sub" title="market closed: last price">·</span>' : '') + '</td>'
       + '<td class="r mono ' + cls(m.ret_1h) + '">' + spct(m.ret_1h) + '</td><td class="r mono ' + cls(m.ret_24h) + '">' + spct(m.ret_24h) + '</td><td class="r mono ' + cls(m.ret_7d) + '">' + spct(m.ret_7d) + '</td>'
       + '<td style="white-space:nowrap"><span class="riskbar"><i style="width:' + m.risk + '%;background:' + TC[m.tier] + '"></i></span><span class="tier ' + m.tier + '">' + m.tier + ' ' + Math.round(m.risk) + '</span></td>'
       + '<td class="r mono ' + cls(m.score) + '">' + (m.score == null ? "–" : (m.score > 0 ? "+" : "") + m.score.toFixed(2)) + '</td>'
@@ -403,9 +417,10 @@ function riskBoardHTML(s, L) {
       + '<td><div class="rng" title="7-day low ' + price(m.lo7) + ' · high ' + price(m.hi7) + '"><i style="left:' + Math.max(0, Math.min(100, m.range_pos * 100)) + '%"></i></div></td>'
       + '<td>' + signals(m) + '</td></tr>';
   }).join("");
-  return '<div class="card" id="rb"><div class="row"><h2>The Risk Board · live scan of ' + rows.length + ' coins</h2><span class="sub">prices ' + (L.ts ? utc(L.ts) + " UTC" : "–") + ' · desk calls from the ' + (s ? utc(s.ts) : "–") + ' bar · ' + ((s && s.desk) ? s.desk.horizon : 4) + 'h horizon</span></div>'
-    + '<div class="tx"><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>'
-    + '<div class="sub" style="margin-top:8px">Risk is fixed arithmetic (volatility, drawdown, volatility expansion, tail moves, liquidity, beta), not learned. Desk = the advisors\' weighted, learned score across coins; Imani vetoes BUY on anything EXTREME. Dots: filled = likes it, struck = against, faint = no strong view. Tap a header to sort.</div></div>';
+  var chips = nStk ? '<div class="chips" style="margin:6px 0">' + [["all", "All"], ["crypto", "Crypto"], ["stock", "Stocks"]].map(function (a) { return '<button class="chip' + (S.asset == a[0] ? " on" : "") + '" data-asset="' + a[0] + '">' + a[1] + '</button>'; }).join("") + '</div>' : "";
+  return '<div class="card" id="rb"><div class="row"><h2>The Risk Board · live scan of ' + rows.length + (nStk ? ' coins and stocks' : ' coins') + '</h2><span class="sub">prices ' + (L.ts ? utc(L.ts) + " UTC" : "–") + ' · desk calls from the ' + (s ? utc(s.ts) : "–") + ' bar · ' + ((s && s.desk) ? s.desk.horizon : 4) + 'h horizon</span></div>'
+    + chips + '<div class="tx"><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>'
+    + '<div class="sub" style="margin-top:8px">Risk is fixed arithmetic (volatility, drawdown, volatility expansion, tail moves, liquidity, beta), not learned. Desk = the advisors\' weighted, learned score across coins; Imani vetoes BUY on anything EXTREME. Dots: filled = likes it, struck = against, faint = no strong view. Tap a header to sort.' + (nStk ? ' Stocks run on a daily clock: 1h = today\'s move so far, 24h = last full day, 7d = last 5 trading days, vol and RSI are daily, and the stock desk only re-scores after each close.' : '') + '</div></div>';
 }
 
 function alertsHTML() {
@@ -414,24 +429,28 @@ function alertsHTML() {
 }
 
 function learnHTML(s) {
-  var A = s.advisors, sel = A.find(function (a) { return a.key == S.sel; }) || A[0];
+  var A = s.advisors, sel = A.find(function (a) { return a.key == S.sel; }) || A[0], stk = S.lkind == "stock" && s.stocks;
+  var g = function (a, k) { return stk ? a["stock_" + k] : (k == "desk_weight" ? a.desk_weight : a[k]); };
   var rows = A.map(function (a) {
-    return '<tr><td><b style="color:' + ADV[a.key].color + '">' + esc(a.name) + '</b></td><td class="r mono">' + pct(a.desk_weight, 1) + '</td><td class="r mono ' + cls(a.ic) + '">' + (a.ic >= 0 ? "+" : "") + a.ic.toFixed(3) + '</td><td class="r mono">' + pct(a.hit) + '</td><td class="r mono ' + cls(a.excess) + '">' + spct(a.excess) + '</td><td class="r mono">' + pct(a.learned_share) + '</td><td class="r mono">' + pct(a.drift) + '</td></tr>';
+    var w = stk ? a.stock_desk_weight : a.desk_weight, ic = stk ? a.stock_ic : a.ic, hit = stk ? a.stock_hit : a.hit, ex = stk ? null : a.excess, ls = stk ? a.stock_learned_share : a.learned_share, dr = stk ? a.stock_drift : a.drift;
+    return '<tr><td><b style="color:' + ADV[a.key].color + '">' + esc(a.name) + '</b></td><td class="r mono">' + pct(w, 1) + '</td><td class="r mono ' + cls(ic) + '">' + (ic >= 0 ? "+" : "") + ic.toFixed(3) + '</td><td class="r mono">' + pct(hit) + '</td><td class="r mono ' + cls(ex) + '">' + (ex == null ? "–" : spct(ex)) + '</td><td class="r mono">' + pct(ls) + '</td><td class="r mono">' + pct(dr) + '</td></tr>';
   }).join("");
-  var mx = 0; sel.learned.forEach(function (x) { mx = Math.max(mx, Math.abs(x.prior), Math.abs(x.now)); }); mx = mx || 1;
-  var bars = sel.learned.map(function (x) {
+  var L = stk ? sel.stock_learned : sel.learned, mx = 0; L.forEach(function (x) { mx = Math.max(mx, Math.abs(x.prior), Math.abs(x.now)); }); mx = mx || 1;
+  var bars = L.map(function (x) {
     function b(v, p) { var w = Math.abs(v) / mx * 50; return '<span class="bar' + (p ? " p" : "") + '" style="' + (v >= 0 ? "left:50%" : "right:50%") + ';width:' + w.toFixed(1) + '%;' + (p ? "" : "background:" + (v >= 0 ? "var(--good)" : "var(--bad)")) + '"></span>'; }
     return '<span>' + esc(x.name) + '</span><span class="tr" role="img" aria-label="' + esc(x.name) + ': instinct ' + x.prior.toFixed(3) + ', now ' + x.now.toFixed(3) + '">' + b(x.prior, true) + b(x.now, false) + '</span><span class="v">' + (x.prior >= 0 ? "+" : "") + x.prior.toFixed(2) + ' → ' + (x.now >= 0 ? "+" : "") + x.now.toFixed(2) + '</span>';
   }).join("");
   var chips = A.map(function (a) { return '<button class="chip' + (a.key == sel.key ? " on" : "") + '" data-adv="' + a.key + '">' + esc(a.name.split(" ")[0]) + '</button>'; }).join("");
-  return '<div class="card"><h2>How the advisors are learning · ' + ((s.desk && s.desk.rounds) || 0).toLocaleString() + ' graded hours</h2>'
+  var tog = s.stocks ? '<div class="ranges"><button data-lk="crypto" class="' + (!stk ? "on" : "") + '">Crypto desk</button><button data-lk="stock" class="' + (stk ? "on" : "") + '">Stock desk</button></div>' : "";
+  var rounds = stk ? s.stocks.rounds : ((s.desk && s.desk.rounds) || 0), hz = stk ? s.stocks.horizon + " trading days" : ((s.desk && s.desk.horizon) || 4) + "h";
+  return '<div class="card">' + tog + '<h2>How the advisors are learning · ' + (stk ? "stocks" : "crypto") + ' · ' + rounds.toLocaleString() + ' graded ' + (stk ? "days" : "hours") + '</h2>'
     + '<div class="tx"><table><tr><th>Advisor</th><th class="r">Desk weight</th><th class="r">IC</th><th class="r">Hit</th><th class="r">Excess</th><th class="r">From data</th><th class="r">Drift</th></tr>' + rows + '</table></div>'
-    + '<div class="sub" style="margin:6px 0 12px">Every hour each advisor\'s calls from ' + ((s.desk && s.desk.horizon) || 4) + 'h ago are graded against what happened. IC = rank correlation of their scores with realised returns (smoothed); hit = share of their top 3 that beat the field; excess = cumulative top-3 return over the field; from data = how much of their view is now learned rather than instinct; drift = distance moved from their starting instincts.</div>'
+    + '<div class="sub" style="margin:6px 0 12px">Each ' + (stk ? "trading day" : "hour") + ' every advisor\'s calls from ' + hz + ' ago are graded against what happened. IC = rank correlation of their scores with realised returns (smoothed); hit = share of their top 3 that beat the field; excess = cumulative top-3 return over the field; from data = how much of their view is now learned rather than instinct; drift = distance moved from their starting instincts. The crypto and stock desks learn separately.</div>'
     + '<div class="chips">' + chips + '</div><h2>What ' + esc(sel.name) + ' has learned · dashed = instinct, solid = now</h2><div class="lv">' + bars + '</div></div>';
 }
 
 function weightsHTML() {
-  return '<div class="card"><div class="ranges"><button data-w="desk" class="' + (S.wkind == "desk" ? "on" : "") + '">Pick desk</button><button data-w="board" class="' + (S.wkind == "board" ? "on" : "") + '">Exposure board</button></div>'
+  return '<div class="card"><div class="ranges"><button data-w="desk" class="' + (S.wkind == "desk" ? "on" : "") + '">Pick desk</button><button data-w="stock" class="' + (S.wkind == "stock" ? "on" : "") + '">Stock desk</button><button data-w="board" class="' + (S.wkind == "board" ? "on" : "") + '">Exposure board</button></div>'
     + '<h2>Advisor weights · adapting online</h2><div id="wch">' + wChart(S.hist.slice(S.range ? -S.range : 0)) + '</div>'
     + '<div class="sub">' + (S.wkind == "desk" ? "Desk weights move every hour with each advisor's realised, loss-averse pick payoff (Hedge update with a fixed-share floor, so nobody is ever silenced). Dotted line = equal weight." : "Board weights move once a day with each advisor's realised payoff on BTC exposure. The chair can never be out-voted past her own number + 35 points.") + '</div></div>';
 }
@@ -539,6 +558,8 @@ function bind() {
   var k = $("#killbtn"); if (k) k.onclick = function () { if (confirm("Engage the kill switch? No paper order will pass until you clear it with: python run.py reset-kill")) fetch("/api/kill", { method: "POST", headers: { "X-CM": "1" } }).then(function () { S.ver = ""; poll(); }); };
   document.querySelectorAll("#rb th[data-k]").forEach(function (th) { var f = function () { var key = th.dataset.k; S.sort = S.sort.k == key ? { k: key, d: -S.sort.d } : { k: key, d: key == "symbol" ? 1 : -1 }; $("#rbw").innerHTML = riskBoardHTML(S.state.snapshot, S.state.live || {}); bind(); }; th.onclick = f; th.onkeydown = function (e) { if (e.key == "Enter" || e.key == " ") { e.preventDefault(); f(); } }; });
   document.querySelectorAll("#rb tr[data-s]").forEach(function (tr) { tr.onpointermove = function (e) { var m = (S.state.live.coins || []).find(function (c) { return c.symbol == tr.dataset.s; }); if (!m || !m.risk_why) return; showTip(e, "<b>" + esc(sym(m.symbol)) + "</b> risk " + Math.round(m.risk) + " (" + m.tier + ")<br>drivers: " + esc(m.risk_why.join(", ") || "none") + "<br>beta to BTC " + m.beta.toFixed(2) + " · 24h volume $" + (m.usd_vol_24h / 1e6).toFixed(1) + "M"); }; tr.onpointerleave = hideTip; });
+  document.querySelectorAll("[data-asset]").forEach(function (b) { b.onclick = function () { S.asset = b.dataset.asset; $("#rbw").innerHTML = riskBoardHTML(S.state.snapshot, S.state.live || {}); bind(); }; });
+  document.querySelectorAll("[data-lk]").forEach(function (b) { b.onclick = function () { S.lkind = b.dataset.lk; $("#lrn").innerHTML = learnHTML(S.state.snapshot); bind(); }; });
   document.querySelectorAll("[data-adv]").forEach(function (b) { b.onclick = function () { S.sel = b.dataset.adv; $("#lrn").innerHTML = learnHTML(S.state.snapshot); bind(); }; });
   document.querySelectorAll(".seat").forEach(function (b) { b.onclick = function () { S.sel = b.dataset.k; $("#lrn").innerHTML = learnHTML(S.state.snapshot); bind(); $("#lrn").scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "nearest" }); }; });
   document.querySelectorAll("[data-ev]").forEach(function (b) { b.onclick = function () { S.evKind = b.dataset.ev; $("#evs").innerHTML = eventsHTML(); bind(); }; });

@@ -59,7 +59,9 @@
     "on_cap_exceeded": "clamp",
     "max_position_pct": {
       "BTC-USD": 0.5,
-      "ETH-USD": 0.35
+      "ETH-USD": 0.35,
+      "SPY": 0.3,
+      "IBIT": 0.2
     },
     "default_max_position_pct": 0.15,
     "kill_file": "data/KILL",
@@ -83,5 +85,25 @@
     "approve_token": null,
     "ntfy_topic": null,
     "dashboard_url": null
+  },
+  "stocks": {
+    "symbols": [
+      "SPY",
+      "IBIT",
+      "GLD",
+      "XLE",
+      "XLV",
+      "GDX",
+      "COPX",
+      "ITA",
+      "URA",
+      "VTIP"
+    ],
+    "proxy": "SPY",
+    "share": 0.4,
+    "csv_dir": "data/stocks",
+    "propose_at": "10:00",
+    "horizon_days": 2,
+    "conviction_days": 3
   }
 }

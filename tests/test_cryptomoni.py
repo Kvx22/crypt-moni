@@ -19,7 +19,7 @@ from cryptomoni import advisors, scanner  # noqa: E402
 from cryptomoni.advisors import ADVISORS, ExposureBoard, PickDesk  # noqa: E402
 from cryptomoni.allocation import Allocator  # noqa: E402
 from cryptomoni.engine import read_daily_csv  # noqa: E402
-from cryptomoni.feeds import HOUR, CoinbaseAdvanced, CoinbaseExchange, Kraken, SimFeed, completed  # noqa: E402
+from cryptomoni.feeds import HOUR, CoinbaseAdvanced, CoinbaseExchange, Kraken, SimFeed, Yahoo, completed, stock_market_open  # noqa: E402
 from cryptomoni.models import Bar, Order  # noqa: E402
 from cryptomoni.paper import PaperBroker  # noqa: E402
 from cryptomoni.regime import HMM, RegimeTracker, make_features  # noqa: E402
@@ -272,6 +272,89 @@ class TestFeeds(unittest.TestCase):
         self.assertGreaterEqual(len(f.candles("BTC-USD", HOUR)), min(n + 1, 300))
 
 
+class TestStocks(unittest.TestCase):
+    def test_market_hours(self):
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        ts = lambda y, m, d, h, mi: dt.datetime(y, m, d, h, mi, tzinfo=et).timestamp()
+        self.assertTrue(stock_market_open(ts(2026, 10, 16, 9, 30)))      # Friday open
+        self.assertFalse(stock_market_open(ts(2026, 10, 16, 16, 0)))     # closing bell
+        self.assertFalse(stock_market_open(ts(2026, 10, 17, 11, 0)))     # Saturday
+        self.assertFalse(stock_market_open(ts(2026, 10, 16, 8, 0)))
+
+    def test_yahoo_parse(self):
+        j = {"chart": {"error": None, "result": [{
+            "meta": {"regularMarketPrice": 771.79, "regularMarketTime": 1792180000},
+            "timestamp": [1792071000, 1792157400, 1792243800],
+            "indicators": {"quote": [{"open": [768.0, 770.0, None], "high": [772.0, 773.0, None], "low": [766.0, 769.0, None],
+                                      "close": [769.6, 771.79, None], "volume": [60000000, 55000000, None]}]}}]}}
+        bars, px, qt = Yahoo.parse(j)
+        self.assertEqual(len(bars), 2)                               # the unfinished session (null close) is dropped
+        self.assertEqual(bars[1].close, 771.79)
+        self.assertEqual(bars[0].ts % 86400, 0)                      # midnight UTC of the exchange date
+        self.assertEqual((px, qt), (771.79, 1792180000.0))
+        with self.assertRaises(Exception):
+            Yahoo.parse({"chart": {"result": None, "error": {"description": "Not Found"}}})
+
+    def test_daily_metrics_beta_and_horizons(self):
+        from cryptomoni.stocks import daily_metrics
+        rng = np.random.default_rng(5)
+        spy_r = rng.normal(0.0004, 0.01, 300)
+        spy = 400 * np.exp(np.cumsum(spy_r))
+        stock = 50 * np.exp(np.cumsum(2 * spy_r))                      # a 2x-beta name
+        dates = [f"d{i:04d}" for i in range(300)]
+        m = daily_metrics(dates, list(stock), dict(zip(dates, spy)))
+        self.assertAlmostEqual(m["beta"], 2.0, delta=0.1)
+        self.assertAlmostEqual(m["ret_24h"], stock[-1] / stock[-2] - 1, places=9)
+        self.assertAlmostEqual(m["ret_7d"], stock[-1] / stock[-6] - 1, places=9)
+        self.assertEqual(m["ret_1h"], 0.0)                              # no live price: no intraday move
+        live = daily_metrics(dates, list(stock), dict(zip(dates, spy)), live=stock[-1] * 1.03)
+        self.assertAlmostEqual(live["ret_1h"], 0.03, places=9)
+        self.assertEqual(m["asset"], "stock")
+        self.assertIsNone(daily_metrics(dates[:50], list(stock[:50]), {}))
+
+    def test_stock_risk_is_stock_sized(self):
+        from cryptomoni.stocks import daily_metrics
+        rng = np.random.default_rng(6)
+        calm = 100 * np.exp(np.cumsum(rng.normal(0, 0.006, 300)))
+        wild = 100 * np.exp(np.cumsum(rng.normal(0, 0.035, 300)))
+        dates = [f"d{i:04d}" for i in range(300)]
+        spy = dict(zip(dates, calm))
+        a, b = daily_metrics(dates, list(calm), spy), daily_metrics(dates, list(wild), spy)
+        self.assertEqual(a["tier"], "LOW")
+        self.assertLess(a["risk"], b["risk"])
+        self.assertNotEqual(b["tier"], "LOW")                          # a 55%-volatility stock is no longer "low risk"
+
+    def test_coinbase_cannot_hold_stocks(self):
+        from cryptomoni.brokers import CoinbaseBroker
+        from cryptomoni.engine import Engine
+        from cryptomoni.store import Store
+        d = tempfile.mkdtemp()
+        try:
+            cfg = json.load(open(os.path.join(ROOT, "config.coinbase.json")))
+            cfg.update(db=os.path.join(d, "x.db"), stocks=dict(symbols=["SPY"], csv_dir=os.path.join(ROOT, "data", "stocks")))
+            cfg["safety"]["kill_file"] = os.path.join(d, "KILL")
+            st = Store(cfg["db"])
+            with self.assertRaises(ValueError):
+                Engine(cfg, SimFeed(["BTC-USD"], start_ts=time.time()), st, broker=CoinbaseBroker(client=object(), cache_s=0))
+            st.close()
+        finally:
+            shutil.rmtree(d)
+
+    def test_robinhood_snapshot_counts_other_holdings(self):
+        from cryptomoni.brokers import RobinhoodHandoff
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "rh.json")
+            json.dump(dict(ts=time.time(), cash=100.0, positions={"SPY": 2.0, "BTC-USD": 0.001}, other_value=300.0), open(path, "w"))
+            a = RobinhoodHandoff(path).account({"SPY": (700.0, 0), "BTC-USD": (80000.0, 0)})
+            self.assertAlmostEqual(a.equity, 100 + 300 + 1400 + 80, places=6)
+            self.assertEqual(set(a.positions), {"SPY", "BTC-USD"})
+        finally:
+            shutil.rmtree(d)
+
+
 class TestEngineEndToEnd(unittest.TestCase):
     """Runs the whole loop on the simulator: scanner -> brain -> advisors -> paper -> store -> dashboard API."""
 
@@ -299,14 +382,44 @@ class TestEngineEndToEnd(unittest.TestCase):
         self.assertIn(s["regime"], ("crash", "bear", "neutral", "bull", "euphoria"))
         self.assertGreater(s["desk"]["rounds"], 40)
         self.assertAlmostEqual(sum(a["desk_weight"] for a in s["advisors"]), 1.0, places=6)
-        self.assertEqual(len(s["coins"]), len(self.cfg["universe"]))
+        self.assertEqual(len(s["coins"]), len(self.cfg["universe"]) + len(self.cfg["stocks"]["symbols"]))
         self.assertTrue(all(c["verdict"] in ("BUY", "WATCH", "NEUTRAL", "AVOID", "VETOED") for c in s["coins"]))
         self.assertGreater(s["equity"], 0)
         self.assertLessEqual(s["e_target"], s["breaker"]["cap"] + 1e-9)
         self.assertTrue(s["minutes"])
         live = self.eng.s.kv_get("live")
-        self.assertEqual(len(live["coins"]), len(self.cfg["universe"]))
+        self.assertEqual(len(live["coins"]), len(self.cfg["universe"]) + len(self.cfg["stocks"]["symbols"]))
         self.assertFalse(os.path.exists(self.cfg["safety"]["kill_file"]))
+
+    def test_stock_book_runs_beside_crypto(self):
+        s = self.eng.s.latest()
+        self.assertIsNotNone(s["stocks"])
+        self.assertIn(s["stocks"]["regime"], ("crash", "bear", "neutral", "bull", "euphoria"))
+        stock_coins = [c for c in s["coins"] if c.get("asset") == "stock"]
+        self.assertEqual(len(stock_coins), len(self.cfg["stocks"]["symbols"]))
+        self.assertTrue(all("stock_desk_weight" in a for a in s["advisors"]))
+        self.assertAlmostEqual(sum(a["stock_desk_weight"] for a in s["advisors"]), 1.0, places=6)
+        w = self.eng.merged_weights()
+        stock_w = sum(v for k, v in w.items() if "-" not in k)
+        crypto_w = sum(v for k, v in w.items() if "-" in k)
+        self.assertLessEqual(stock_w, self.cfg["stocks"]["share"] + 1e-9)       # each book stays inside its share
+        self.assertLessEqual(crypto_w, 1 - self.cfg["stocks"]["share"] + 1e-9)
+        live = self.eng.s.kv_get("live")
+        self.assertEqual(sum(1 for c in live["coins"] if c.get("asset") == "stock"), len(self.cfg["stocks"]["symbols"]))
+
+    def test_plan_skips_stocks_when_market_is_closed(self):
+        from cryptomoni.models import Account
+        acct = Account(10000.0, 10000.0, {})
+        quotes = {"SPY": (700.0, time.time()), "BTC-USD": (80000.0, time.time())}
+        w = {"SPY": 0.2, "BTC-USD": 0.2}
+        orig = self.eng.feed.market_open
+        try:
+            self.eng.feed.market_open = lambda sym=None: False
+            self.assertEqual({o.symbol for o in self.eng.plan(acct, w, quotes)}, {"BTC-USD"})
+            self.eng.feed.market_open = lambda sym=None: True
+            self.assertEqual({o.symbol for o in self.eng.plan(acct, w, quotes)}, {"BTC-USD", "SPY"})
+        finally:
+            self.eng.feed.market_open = orig
 
     def test_kill_switch_stops_paper_orders(self):
         KillSwitch(self.cfg["safety"]["kill_file"]).trip("test")

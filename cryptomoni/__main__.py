@@ -16,7 +16,7 @@ Live mode (config.coinbase.json / config.robinhood.json): the board proposes, yo
   approve ID|all, reject ID              same rules as the dashboard buttons
   export-approved                        Robinhood: approved orders as JSON for Claude to place
   ack ID --status sent|failed [--order-id X] [--detail TEXT]   Robinhood: record what Claude did
-  rh-snapshot --cash N --pos BTC-USD=0.01,ETH-USD=0.2         Robinhood: write the synced balances
+  rh-snapshot --cash N --pos BTC-USD=0.01,SPY=1.5 [--other N] Robinhood: write the synced balances (crypto + stocks)
   kill | reset-kill | reset-breaker      safety controls (only a human resets)
 """
 from __future__ import annotations
@@ -51,6 +51,12 @@ def build(cfg, fresh=False):
             last = next(reversed(daily))
             anchors = {cfg.get("market_proxy", "BTC-USD"): daily[last]}
             f.setdefault("start_ts", day_ts(last) + DAY)
+            from .stocks import read_closes
+            sd = (cfg.get("stocks") or {}).get("csv_dir", "data/stocks")
+            for sym in (cfg.get("stocks") or {}).get("symbols", []):   # simulated stocks start from their real last close
+                cs = read_closes(os.path.join(sd, f"{sym}.csv"))
+                if cs:
+                    anchors[sym] = cs[next(reversed(cs))]
     return Engine(cfg, make_feed(cfg, anchors), Store(db))
 
 
@@ -91,6 +97,7 @@ def main(argv=None):
     ap.add_argument("--detail", default="")
     ap.add_argument("--cash", type=float, default=None)
     ap.add_argument("--pos", default="")
+    ap.add_argument("--other", type=float, default=0.0)
     ap.add_argument("--config", default=None)
     ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--host", default=None)
@@ -182,7 +189,7 @@ def live_cmds(a, cfg, kill_file):
     ex = cfg.get("execution", {})
     if a.cmd == "rh-snapshot":
         if a.cash is None:
-            return print("usage: rh-snapshot --cash 123.45 --pos BTC-USD=0.0012,ETH-USD=0.05")
+            return print("usage: rh-snapshot --cash 123.45 --pos BTC-USD=0.0012,SPY=1.5 [--other VALUE_OF_OTHER_HOLDINGS]")
         pos = {}
         for kv in filter(None, a.pos.split(",")):
             k, v = kv.split("=")
@@ -190,8 +197,8 @@ def live_cmds(a, cfg, kill_file):
         path = ex.get("snapshot", "data/robinhood_snapshot.json")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
-            json.dump(dict(ts=time.time(), cash=a.cash, positions=pos, source="Claude Robinhood connector"), f, indent=2)
-        return print(f"wrote {path}: cash ${a.cash:,.2f}, {len(pos)} position(s)")
+            json.dump(dict(ts=time.time(), cash=a.cash, positions=pos, other_value=a.other, source="Claude Robinhood connector"), f, indent=2)
+        return print(f"wrote {path}: cash ${a.cash:,.2f}, {len(pos)} position(s), other holdings ${a.other:,.2f}")
     st = Store(cfg["db"])
     now = time.time()
     st.expire_outbox(now)
@@ -220,11 +227,12 @@ def live_cmds(a, cfg, kill_file):
         sc = SafetyConfig.from_dict(cfg.get("safety", {}))
         killed = KillSwitch(kill_file).engaged()
         rows = [] if killed else st.outbox(200, "approved")
-        out = [dict(outbox_id=r["id"], symbol=r["symbol"], side=r["side"], notional_usd=round(min(r["notional"], sc.max_per_trade_usd or 0), 2),
+        out = [dict(outbox_id=r["id"], symbol=r["symbol"], asset="crypto" if "-" in r["symbol"] else "stock", side=r["side"],
+                    notional_usd=round(min(r["notional"], sc.max_per_trade_usd or 0), 2),
                     ref_price=r["ref_price"], max_move=sc.price_band_pct, client_order_id=r["client_order_id"],
                     expires_in_min=round((r["expires_ts"] - now) / 60)) for r in reversed(rows)]
         return print(json.dumps(dict(broker=ex.get("broker"), kill_switch=killed, max_per_trade_usd=sc.max_per_trade_usd,
-                                     rule="place each only if the live price is within max_move of ref_price; then ack it",
+                                     rule="place each only if the live price is within max_move of ref_price; stocks only while the US market is open; then ack it",
                                      orders=out), indent=2))
     if a.cmd == "ack":
         r = st.outbox_get(int(a.id)) if a.id else None
@@ -315,6 +323,16 @@ def doctor(cfg, cfg_path, kill_file):
             line(False, "execution.broker must be coinbase or robinhood in live mode")
         print("  INFO  approval token " + ("set" if (os.environ.get("CM_TOKEN") or ex.get("approve_token")) else "not set (fine on localhost; set one before reaching the dashboard over a network)"))
         print("  INFO  phone push " + ("on (ntfy)" if ex.get("ntfy_topic") else "off (set execution.ntfy_topic)"))
+    if cfg.get("stocks"):
+        from .feeds import StockFeed, stock_market_open
+        sp = cfg["stocks"].get("proxy", "SPY")
+        print(f"  INFO  stock book: {len(cfg['stocks']['symbols'])} symbols, {cfg['stocks'].get('share', 0.4):.0%} of the account, "
+              f"US market {'open' if stock_market_open(time.time()) else 'closed'} now")
+        try:
+            p, ts = StockFeed().ticker(sp)
+            line(True, f"Yahoo Finance: {sp} ${p:,.2f} (last trade {(time.time() - ts) / 60:.0f} min ago)")
+        except FeedError as e:
+            line(False, f"stock data unreachable (Yahoo Finance): {e}")
     feed = make_feed(cfg)
     try:
         p, ts = feed.ticker(cfg.get("market_proxy", "BTC-USD"))

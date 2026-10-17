@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -147,6 +148,52 @@ class Kraken:
         return float(r["c"][0]), time.time()
 
 
+ET = ZoneInfo("America/New_York")
+OPEN_T, CLOSE_T = dt.time(9, 30), dt.time(16, 0)
+
+
+def stock_market_open(ts):
+    """US regular session, Mon-Fri 9:30-16:00 ET. Holidays are not listed: on one, quotes stop moving,
+    go stale, and the safety gate refuses to trade on them."""
+    d = dt.datetime.fromtimestamp(ts, ET)
+    return d.weekday() < 5 and OPEN_T <= d.time() < CLOSE_T
+
+
+class Yahoo:
+    """Yahoo Finance's public chart endpoint for US stocks and ETFs (unofficial, no key)."""
+    name = "yahoo"
+    base = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+    @staticmethod
+    def parse(j):
+        """-> (daily bars with ts = 00:00 UTC of the exchange date, quote price, quote time)."""
+        res = (j.get("chart") or {}).get("result")
+        if not res:
+            raise FeedError(f"yahoo: {((j.get('chart') or {}).get('error') or {}).get('description', 'no result')}")
+        r = res[0]
+        meta = r.get("meta", {})
+        q = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+        bars = []
+        for i, t in enumerate(r.get("timestamp") or []):
+            try:
+                o, h, l, c, v = (q[k][i] for k in ("open", "high", "low", "close", "volume"))
+            except (KeyError, IndexError):
+                continue
+            if c is None:
+                continue  # a session that has not closed yet can come back null
+            day = dt.datetime.fromtimestamp(t, ET).date()
+            ts = int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.timezone.utc).timestamp())
+            bars.append(Bar(ts, float(o if o is not None else c), float(h if h is not None else c),
+                            float(l if l is not None else c), float(c), float(v or 0)))
+        px, qt = meta.get("regularMarketPrice"), meta.get("regularMarketTime")
+        return bars, (float(px) if px else None), (float(qt) if qt else None)
+
+    def fetch(self, symbol, rng="3mo"):
+        j = http_json(f"{self.base}/{urllib.parse.quote(symbol)}?interval=1d&range={rng}&includePrePost=false")
+        return self.parse(j)
+
+
+# ---------------------------------------------------------------------------
 SOURCES = {"coinbase": CoinbaseExchange, "coinbase-advanced": CoinbaseAdvanced, "kraken": Kraken}
 
 
@@ -185,6 +232,103 @@ class LiveFeed:
     def ticker(self, symbol):
         return self._try("ticker", symbol)
 
+    # stock-book API (crypto symbols pass straight through)
+    def market_open(self, symbol=None):
+        return True
+
+
+class StockFeed:
+    """US stocks/ETFs from Yahoo, cached so a one-minute scan doesn't hammer a free endpoint.
+    Completed daily bars only; the quote carries Yahoo's own last-trade time, so a closed
+    market (or a holiday) shows up as an old quote that the safety gate refuses."""
+    kind = "yahoo"
+    simulated = False
+
+    def __init__(self, quote_seconds=90, daily_seconds=1800, pause=0.15):
+        self.y, self.qs, self.ds, self.pause = Yahoo(), quote_seconds, daily_seconds, pause
+        self._q, self._d = {}, {}
+        self.errors = {}
+
+    def now(self):
+        return time.time()
+
+    def tick(self):
+        pass
+
+    def market_open(self, symbol=None):
+        return stock_market_open(self.now())
+
+    def _fetch(self, symbol):
+        try:
+            bars, px, qt = self.y.fetch(symbol)
+        except FeedError:
+            self.errors[symbol] = self.errors.get(symbol, 0) + 1
+            raise
+        time.sleep(self.pause)
+        return bars, px, qt
+
+    def daily(self, symbol, now=None):
+        """Completed daily bars (up to ~3 months)."""
+        now = now or self.now()
+        c = self._d.get(symbol)
+        if c and now - c[0] < self.ds:
+            return c[1]
+        bars, px, qt = self._fetch(symbol)
+        if px:
+            self._q[symbol] = (now, (px, qt or now))
+        d = dt.datetime.fromtimestamp(now, ET)
+        today = int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp())
+        after_close = d.time() >= dt.time(16, 15)
+        out = [b for b in bars if b.ts < today or (b.ts == today and after_close and d.weekday() < 5)]
+        self._d[symbol] = (now, out)
+        return out
+
+    def ticker(self, symbol):
+        now = self.now()
+        c = self._q.get(symbol)
+        age = self.qs if stock_market_open(now) else 900
+        if c and now - c[0] < age:
+            return c[1]
+        bars, px, qt = self._fetch(symbol)
+        if not px:
+            raise FeedError(f"yahoo {symbol}: no price")
+        self._q[symbol] = (now, (px, qt or now))
+        return px, qt or now
+
+
+class MixedFeed:
+    """Crypto from the exchanges, stocks from Yahoo, behind one interface."""
+    kind = "live"
+    simulated = False
+
+    def __init__(self, crypto, stocks, stock_symbols):
+        self.crypto, self.stocks, self.stock_set = crypto, stocks, set(stock_symbols)
+
+    @property
+    def last_source(self):
+        return self.crypto.last_source
+
+    def now(self):
+        return time.time()
+
+    def tick(self):
+        pass
+
+    def is_stock(self, symbol):
+        return symbol in self.stock_set
+
+    def market_open(self, symbol=None):
+        return self.stocks.market_open() if symbol is None or symbol in self.stock_set else True
+
+    def candles(self, symbol, gran, start=None, end=None):
+        return self.crypto.candles(symbol, gran, start, end)
+
+    def ticker(self, symbol):
+        return (self.stocks if symbol in self.stock_set else self.crypto).ticker(symbol)
+
+    def daily(self, symbol, now=None):
+        return self.stocks.daily(symbol, now)
+
 
 # ---------------------------------------------------------------------------
 class SimFeed:
@@ -214,6 +358,7 @@ class SimFeed:
         self.clock = float(t0) + 1800     # half past: ticks land mid-hour, like a real scan would
         n = len(self.symbols)
         r = self.rng
+        self.vscale = np.array([1.0 if "-" in s else 0.28 for s in self.symbols])   # stocks move far less than coins
         self.beta = np.array([1.0 if s.startswith("BTC") else r.uniform(0.9, 1.6) for s in self.symbols])
         self.ivol = np.array([0.0 if s.startswith("BTC") else r.uniform(0.003, 0.007) for s in self.symbols])
         anchors = {**self.START, **(anchors or {})}
@@ -245,7 +390,7 @@ class SimFeed:
         signal = self.phase() * 0.15 * self.idio.mean(0)          # planted 24h-return signal
         e = signal + self.ivol * r.standard_normal(len(self.symbols))
         self.idio = np.vstack([self.idio[1:], e])
-        ret = self.beta * f + e
+        ret = (self.beta * f + e) * self.vscale
         for i, s in enumerate(self.symbols):
             o = self.price[i]
             c = o * math.exp(ret[i])
@@ -282,15 +427,29 @@ class SimFeed:
             return completed(out, DAY, self.clock)
         raise FeedError(f"sim feed has no {gran}s bars")
 
+    def market_open(self, symbol=None):
+        return True   # the simulator has no closing bell
+
+    def daily(self, symbol, now=None):
+        return self.candles(symbol, DAY)
+
     def ticker(self, symbol):
         last = self.bars[symbol][-1]
         frac = (self.clock - (last.ts + HOUR)) / HOUR
         return last.close * math.exp(self.rng.normal(0, 0.002) * math.sqrt(max(frac, 0.0))), self.clock
 
 
+def stock_symbols(cfg):
+    return list((cfg.get("stocks") or {}).get("symbols", []))
+
+
 def make_feed(cfg, anchors=None):
     f = cfg.get("feed", {})
+    stocks = stock_symbols(cfg)
     if f.get("kind", "live") == "sim":
-        return SimFeed(cfg["universe"], start_ts=f.get("start_ts"), seed=f.get("seed", 7), anchors=anchors,
+        return SimFeed(list(cfg["universe"]) + stocks, start_ts=f.get("start_ts"), seed=f.get("seed", 7), anchors=anchors,
                        step=f.get("step_seconds", HOUR), flip_hours=f.get("flip_hours", 240))
-    return LiveFeed(tuple(f.get("sources", ("coinbase", "coinbase-advanced", "kraken"))))
+    crypto = LiveFeed(tuple(f.get("sources", ("coinbase", "coinbase-advanced", "kraken"))))
+    if not stocks:
+        return crypto
+    return MixedFeed(crypto, StockFeed(f.get("stock_quote_seconds", 90)), stocks)

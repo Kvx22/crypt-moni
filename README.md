@@ -37,7 +37,7 @@ Python 3.10+ and numpy. From inside the `crypt-moni` folder (Windows: use `py` i
 
 ```bash
 pip install -r requirements.txt
-python -m unittest discover -s tests          # 35 tests, ~40 s
+python -m unittest discover -s tests          # 43 tests, ~40 s
 
 # See it work offline first: three weeks of SIMULATED market in ~45 s
 python run.py demo
@@ -61,6 +61,16 @@ Read [EXECUTION.md](EXECUTION.md). The short version: Coinbase connects through 
 approve within a minute, day or night; Robinhood's agentic account is only reachable through Claude's connector, so
 approved Robinhood orders wait for a Claude session. For a true 24/7 setup: Coinbase, on an always-on machine,
 dashboard on your phone over Tailscale, push notifications from ntfy when the board wants your approval.
+
+### Stocks too (Robinhood board)
+
+`config.robinhood.json` adds a **stock sleeve** (40% of the account by default) beside the 12 coins: SPY, IBIT, GLD,
+XLE, XLV, GDX, COPX, ITA, URA and VTIP. It is the same five advisors on a stock clock: a regime brain on SPY, a
+separate stock exposure board and stock pick desk that learn from completed trading days (the crypto and stock desks
+never mix), proposals once each trading morning from 10:00 ET, orders only while the US market is open. Stock data
+comes from Yahoo Finance's free public endpoint (unofficial; if it ever blocks you, the scanner keeps running and
+stock rows just go stale). The dashboard shows stocks in the risk board (filter: All / Crypto / Stocks), a stock-market
+brain card, and a Crypto desk / Stock desk toggle on the learning view. Details in [EXECUTION.md](EXECUTION.md).
 
 ### Run it 24/7
 
