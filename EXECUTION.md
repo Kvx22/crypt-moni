@@ -103,6 +103,24 @@ their value toward your equity but never trades them.
      (or `--status failed --detail "<reason>"`).
    Never place anything that is not in that list.
 
+## Research with Claude (opportunity scout)
+
+The scout (see the README) brings back leads the advisors like. To have Claude research them, in Claude Code on the
+machine running the board, say: **"research the board's opportunities"**. Claude should:
+
+1. Run `python run.py scout-export --config <config>` and read the candidates and the research checklist it prints.
+2. For each candidate (the top few; skip ones with `already_researched` unless asked): stocks, use the Robinhood
+   tools for fundamentals, analyst ratings, the earnings calendar and recent SEC filings, plus a current news
+   search; coins, use a news search (listings, unlocks, exploits, regulation) and what the project does. Open the
+   pages, say which sources are aggregators, mark any date it could not confirm, check the weekday of each catalyst
+   date, and flag AI-valuation exposure.
+3. Record each one: `python run.py research SYMBOL --config <config> --verdict favorable|mixed|unfavorable|unverified --note "reasons and what would change it" --source URL --catalyst "date: event"`.
+4. Never place an order and never put a name on the watchlist for you. Tell you which leads look best, then you
+   decide: the **Watch** button on the dashboard (or `python run.py watch SYMBOL`) puts a name on the board. From
+   there it is scanned and scored like every other name, and any trade is still proposed for your approval.
+
+Watched names are adopted by the running scanner on its next tick. Removing one takes effect at the next restart.
+
 ## Commands
 
 ```

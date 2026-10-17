@@ -11,6 +11,12 @@
   doctor    [--config F]                 check config, data, feed and safety settings
   backtest  [--days N]                   walk-forward test of the brain + exposure board on BTC daily closes
 
+Opportunity scout (the advisors look beyond the board's own list):
+  scout-export                           the shortlist as JSON, with what Claude should research for each name
+  research SYMBOL --verdict favorable|mixed|unfavorable|unverified --note TEXT [--source URL]... [--catalyst TEXT]
+                                         attach a research note (what Claude does after researching a candidate)
+  watch SYMBOL | unwatch SYMBOL          put a shortlisted name on the board's watchlist (or take it off)
+
 Live mode (config.coinbase.json / config.robinhood.json): the board proposes, you approve.
   outbox                                 list proposed / approved / sent orders
   approve ID|all, reject ID              same rules as the dashboard buttons
@@ -90,7 +96,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["up", "scan", "dashboard", "watchdog", "demo", "once", "status", "export", "doctor", "backtest",
                                     "kill", "reset-kill", "reset-breaker", "outbox", "approve", "reject",
-                                    "export-approved", "ack", "rh-snapshot"])
+                                    "export-approved", "ack", "rh-snapshot", "scout-export", "research", "watch", "unwatch"])
+    ap.add_argument("--verdict", choices=["favorable", "mixed", "unfavorable", "unverified"], default="unverified")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--source", action="append", default=[])
+    ap.add_argument("--catalyst", default="")
     ap.add_argument("id", nargs="?", default=None)
     ap.add_argument("--status", choices=["sent", "failed"], default=None)
     ap.add_argument("--order-id", default="")
@@ -132,6 +142,8 @@ def main(argv=None):
     token = os.environ.get("CM_TOKEN") or cfg.get("execution", {}).get("approve_token")
     if a.cmd in ("outbox", "approve", "reject", "export-approved", "ack", "rh-snapshot"):
         return live_cmds(a, cfg, kill_file)
+    if a.cmd in ("scout-export", "research", "watch", "unwatch"):
+        return scout_cmds(a, cfg)
     if a.cmd == "dashboard":
         from .dashboard import serve
         return serve(cfg["db"], kill_file, port, host, token)
@@ -181,6 +193,53 @@ def main(argv=None):
         eng.run_forever(scan_s)
     except KeyboardInterrupt:
         print("stopped")
+
+
+def scout_cmds(a, cfg):
+    from .store import Store
+    st = Store(cfg["db"])
+    now = time.time()
+    opps = st.kv_get("opps") or {}
+    items = [i for v in opps.values() for i in v.get("items", [])]
+    if a.cmd == "scout-export":
+        research = st.kv_get("research", {})
+        out = []
+        for i in items:
+            out.append(dict(symbol=i["symbol"], asset=i["asset"], desk_score=round(i["score"], 2), verdict=i["verdict"], risk=f"{i['tier']} {i['risk']:.0f}",
+                            price=i["price"], ret_24h=round(i["ret_24h"], 4), ret_7d=round(i["ret_7d"], 4), annual_vol=round(i["vol_24h"], 2),
+                            ai_exposed=i["ai_exposed"], advisors_who_like_it=[w["name"] for w in i["why"]],
+                            already_researched=i["symbol"] in research))
+        return print(json.dumps(dict(
+            asof=time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(max([v["ts"] for v in opps.values()] or [now]))),
+            what_this_is="candidates the five advisors found outside the board's own list by scoring market data with their learned weights; they are leads, not recommendations",
+            how_to_research=["for stocks: fundamentals, analyst ratings, the next earnings date and recent SEC filings (Robinhood tools), plus a current news search",
+                             "for coins: a current news search (listings, unlocks, exploits, regulation), what the project does, and who holds the supply",
+                             "open pages rather than trusting search snippets; say which sources are aggregators; mark any date you could not confirm; check the weekday of every catalyst date",
+                             "flag anything that depends on AI valuations (ai_exposed marks the obvious ones); the owner wants to avoid those",
+                             "give a verdict: favorable, mixed, unfavorable or unverified, with the reasons and what would change it; never place an order"],
+            record_with="python run.py research SYMBOL --config <config> --verdict ... --note \"...\" --source URL --catalyst \"date: event\"",
+            candidates=out), indent=2))
+    if a.cmd == "research":
+        sym = (a.id or "").upper()
+        if not sym or not a.note:
+            return print("usage: research SYMBOL --verdict favorable|mixed|unfavorable|unverified --note TEXT [--source URL]... [--catalyst TEXT]")
+        r = st.kv_get("research", {})
+        r[sym] = dict(ts=now, verdict=a.verdict, note=a.note[:1500], sources=a.source[:8], catalyst=a.catalyst[:200], by="Claude")
+        st.kv_set("research", r)
+        st.add_event(now, "scout", "info", f"Research on {sym}: {a.verdict}", a.note[:200])
+        return print(f"saved research on {sym} ({a.verdict})")
+    sym = (a.id or "").upper()
+    wl = st.kv_get("watchlist", [])
+    if a.cmd == "watch":
+        found = next((i for i in items if i["symbol"] == sym), None)
+        if not found:
+            return print(f"{sym} is not on the scout's shortlist (run `scout-export` to see it)")
+        if not any(w["symbol"] == sym for w in wl):
+            wl.append(dict(symbol=sym, asset=found["asset"], added=now))
+        st.kv_set("watchlist", wl)
+        return print(f"{sym} is on the watchlist: the running scanner adopts it on its next tick.")
+    st.kv_set("watchlist", [w for w in wl if w["symbol"] != sym])
+    return print(f"{sym} removed from the watchlist (it leaves the board at the next restart).")
 
 
 def live_cmds(a, cfg, kill_file):
@@ -261,7 +320,8 @@ def export(cfg, out):
     events = st.events(150)
     for e in events:
         e["payload"] = None
-    data = dict(state=dict(snapshot=st.latest(), live=st.kv_get("live"), heartbeat_age=None, kill=False,
+    data = dict(state=dict(snapshot=st.latest(), live=st.kv_get("live"), opps=st.kv_get("opps"), research=st.kv_get("research", {}),
+                           watchlist=st.kv_get("watchlist", []), heartbeat_age=None, kill=False,
                            kill_reason="", version=st.counts()),
                 history=st.history(2000), trades=st.trades(80), events=events, alerts=st.alerts(60))
     with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:

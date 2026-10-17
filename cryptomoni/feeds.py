@@ -258,29 +258,29 @@ class StockFeed:
     def market_open(self, symbol=None):
         return stock_market_open(self.now())
 
-    def _fetch(self, symbol):
+    def _fetch(self, symbol, rng="3mo"):
         try:
-            bars, px, qt = self.y.fetch(symbol)
+            bars, px, qt = self.y.fetch(symbol, rng)
         except FeedError:
             self.errors[symbol] = self.errors.get(symbol, 0) + 1
             raise
         time.sleep(self.pause)
         return bars, px, qt
 
-    def daily(self, symbol, now=None):
-        """Completed daily bars (up to ~3 months)."""
+    def daily(self, symbol, now=None, rng="3mo"):
+        """Completed daily bars (`rng` of history: 3mo for the board's names, 1y/2y for scouting and new names)."""
         now = now or self.now()
-        c = self._d.get(symbol)
-        if c and now - c[0] < self.ds:
+        c = self._d.get((symbol, rng))
+        if c and now - c[0] < (self.ds if rng == "3mo" else 6 * 3600):
             return c[1]
-        bars, px, qt = self._fetch(symbol)
+        bars, px, qt = self._fetch(symbol, rng)
         if px:
             self._q[symbol] = (now, (px, qt or now))
         d = dt.datetime.fromtimestamp(now, ET)
         today = int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc).timestamp())
         after_close = d.time() >= dt.time(16, 15)
         out = [b for b in bars if b.ts < today or (b.ts == today and after_close and d.weekday() < 5)]
-        self._d[symbol] = (now, out)
+        self._d[(symbol, rng)] = (now, out)
         return out
 
     def ticker(self, symbol):
@@ -326,8 +326,8 @@ class MixedFeed:
     def ticker(self, symbol):
         return (self.stocks if symbol in self.stock_set else self.crypto).ticker(symbol)
 
-    def daily(self, symbol, now=None):
-        return self.stocks.daily(symbol, now)
+    def daily(self, symbol, now=None, rng="3mo"):
+        return self.stocks.daily(symbol, now, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +349,8 @@ class SimFeed:
              "LINK-USD": 15, "LTC-USD": 82, "BCH-USD": 440, "DOT-USD": 3.6, "AAVE-USD": 210}
 
     def __init__(self, symbols, start_ts=None, seed=7, history=420, anchors=None, step=HOUR, flip_hours=240):
+        if history == 420 and len(symbols) > 40:
+            history = 3800      # scouting candidates need months of daily bars
         self.symbols = list(symbols)
         self.rng = np.random.default_rng(seed)
         self.step = step
@@ -399,7 +401,7 @@ class SimFeed:
             z = abs(ret[i]) / max(self.beta[i] * self.REG_VOL[2] + self.ivol[i], 1e-6)
             vol = self.basevol[i] / c * math.exp(r.normal(0, 0.35)) * (1 + 1.5 * z)
             self.bars[s].append(Bar(self.t, o, hi, lo, c, vol))
-            self.bars[s] = self.bars[s][-3000:]
+            self.bars[s] = self.bars[s][-4200:]
             self.price[i] = c
         self.t += HOUR
         self.hour_count += 1
@@ -414,6 +416,8 @@ class SimFeed:
             self._gen()
 
     def candles(self, symbol, gran, start=None, end=None):
+        if symbol not in self.bars:
+            raise FeedError(f"sim: no such product {symbol}")   # same as a real exchange: skipped, not fatal
         bars = [b for b in self.bars[symbol] if (start is None or b.ts >= start) and (end is None or b.ts <= end)]
         if gran == HOUR:
             return completed(bars, gran, self.clock)[-300:]
@@ -430,10 +434,12 @@ class SimFeed:
     def market_open(self, symbol=None):
         return True   # the simulator has no closing bell
 
-    def daily(self, symbol, now=None):
+    def daily(self, symbol, now=None, rng=None):
         return self.candles(symbol, DAY)
 
     def ticker(self, symbol):
+        if symbol not in self.bars:
+            raise FeedError(f"sim: no such product {symbol}")
         last = self.bars[symbol][-1]
         frac = (self.clock - (last.ts + HOUR)) / HOUR
         return last.close * math.exp(self.rng.normal(0, 0.002) * math.sqrt(max(frac, 0.0))), self.clock
@@ -447,7 +453,13 @@ def make_feed(cfg, anchors=None):
     f = cfg.get("feed", {})
     stocks = stock_symbols(cfg)
     if f.get("kind", "live") == "sim":
-        return SimFeed(list(cfg["universe"]) + stocks, start_ts=f.get("start_ts"), seed=f.get("seed", 7), anchors=anchors,
+        sc = cfg.get("scout") or {}
+        extra = []
+        if sc.get("enabled", True):
+            from .universe import CRYPTO_CANDIDATES, STOCK_CANDIDATES
+            extra = [x for x in list(sc.get("crypto", CRYPTO_CANDIDATES)) + list(sc.get("stocks", STOCK_CANDIDATES))]
+        names = list(dict.fromkeys(list(cfg["universe"]) + stocks + extra))
+        return SimFeed(names, start_ts=f.get("start_ts"), seed=f.get("seed", 7), anchors=anchors,
                        step=f.get("step_seconds", HOUR), flip_hours=f.get("flip_hours", 240))
     crypto = LiveFeed(tuple(f.get("sources", ("coinbase", "coinbase-advanced", "kraken"))))
     if not stocks:

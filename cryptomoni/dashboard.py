@@ -49,7 +49,8 @@ def make_handler(db, kill_file, token=None):
                 lim = min(int(raw), 20000) if raw.isdigit() else 200
                 if u.path == "/api/state":
                     hb = st.kv_get("heartbeat")
-                    self._json(dict(snapshot=st.latest(), live=st.kv_get("live"),
+                    self._json(dict(snapshot=st.latest(), live=st.kv_get("live"), opps=st.kv_get("opps"),
+                                    research=st.kv_get("research", {}), watchlist=st.kv_get("watchlist", []),
                                     heartbeat_age=None if hb is None else time.time() - hb,
                                     kill=kill.engaged(), kill_reason=kill.reason(), version=st.counts()))
                 elif u.path == "/api/history":
@@ -67,6 +68,29 @@ def make_handler(db, kill_file, token=None):
             finally:
                 st.close()
 
+        def _watch(self, op, sym, query):
+            """Put a scout candidate on the board's watchlist (or take it off). Only names the scout actually
+            surfaced can be added, so a request can't smuggle in an arbitrary symbol."""
+            if token and self.headers.get("X-CM-Token") != token:
+                return self._json(dict(error="token missing or wrong: open the dashboard with ?t=<token>"), 403)
+            sym = sym.upper()
+            st = Store(db)
+            try:
+                wl = st.kv_get("watchlist", [])
+                if op == "add":
+                    opps = st.kv_get("opps") or {}
+                    found = next((i for a in opps.values() for i in a.get("items", []) if i["symbol"] == sym), None)
+                    if not found:
+                        return self._json(dict(error=f"{sym} is not on the scout's shortlist"), 404)
+                    if not any(w["symbol"] == sym for w in wl):
+                        wl.append(dict(symbol=sym, asset=found["asset"], added=time.time()))
+                else:
+                    wl = [w for w in wl if w["symbol"] != sym]
+                st.kv_set("watchlist", wl)
+                return self._json(dict(ok=True, watchlist=wl))
+            finally:
+                st.close()
+
         def do_POST(self):
             if self.headers.get("X-CM") != "1":  # custom header: a cross-site page can't send it
                 return self._json(dict(error="forbidden"), 403)
@@ -75,6 +99,8 @@ def make_handler(db, kill_file, token=None):
                 kill.trip("dashboard kill button")
                 return self._json(dict(ok=True))
             parts = path.strip("/").split("/")   # api/outbox/<id|all>/approve|reject
+            if len(parts) == 4 and parts[:2] == ["api", "watch"] and parts[2] in ("add", "remove"):
+                return self._watch(parts[2], parts[3], urlparse(self.path).query)
             if len(parts) != 4 or parts[:2] != ["api", "outbox"] or parts[3] not in ("approve", "reject"):
                 return self._json(dict(error="forbidden"), 403)
             if token and self.headers.get("X-CM-Token") != token:

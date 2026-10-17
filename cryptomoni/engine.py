@@ -30,6 +30,7 @@ from .regime import REGIMES, WARMUP, RegimeTracker, features_now
 from .notify import push
 from .safety import CircuitBreaker, GateContext, KillSwitch, SafetyConfig, SafetyGate, live_armed
 from .scanner import MIN_BARS, alerts as scan_alerts, metrics, regime_tilt, signal_matrix
+from .scout import Scout
 from .stocks import StockBook
 
 
@@ -58,6 +59,7 @@ class Engine:
         self.sc = SafetyConfig.from_dict(cfg.get("safety", {}))
         self.stocks = StockBook(cfg, store, feed, self._ev) if cfg.get("stocks") else None
         self.stock_set = set(self.stocks.symbols) if self.stocks else set()
+        self.scout = Scout(cfg, store, feed, self._ev) if (cfg.get("scout") or {}).get("enabled", True) else None
         if not self.sc.allowlist:
             self.sc.allowlist = list(self.universe) + sorted(self.stock_set)
         self.kill = KillSwitch(self.sc.kill_file)
@@ -104,6 +106,7 @@ class Engine:
         self.errors = 0
         self.feed_errors = []
         self.load_daily()
+        self.adopt_watchlist()
 
     # ------------------------------------------------------------------ utils
     def _ev(self, ts, kind, sev, title, body="", payload=None):
@@ -304,6 +307,21 @@ class Engine:
         picks = pick_minutes(self.desk, X, syms, mets, regime_name, S)
         return dict(syms=syms, mets=mets, coins=coins, X=X, S=S, picks=picks, notes=notes, fills=fills, e=e, graded=graded)
 
+    def adopt_watchlist(self):
+        """Names you put on the watchlist from the scout join the board: scanned, scored, and tradable only
+        through the same approval-gated process. (Removing a name takes effect at the next restart.)"""
+        for w in self.s.kv_get("watchlist", []):
+            sym = w["symbol"]
+            if w["asset"] == "crypto" and sym not in self.universe:
+                self.universe.append(sym)
+            elif w["asset"] == "stock" and self.stocks and sym not in self.stock_set:
+                self.stocks.add(sym)
+                self.stock_set.add(sym)
+            else:
+                continue
+            if sym not in self.sc.allowlist:
+                self.sc.allowlist.append(sym)
+
     # ------------------------------------------------------------------ crypto + stock books together
     def merged_weights(self):
         w = dict(self.s.kv_get("weights_crypto", {}))
@@ -328,6 +346,12 @@ class Engine:
         if res:
             self.s.kv_set("stock_verdicts", res["verdicts"], commit=False)
             self.s.kv_set("weights", self.merged_weights(), commit=False)
+            if self.scout:
+                try:
+                    self.scout.scan_stocks(now, res["mets"], self.stocks.closes[self.stocks.proxy], self.stocks.desk,
+                                           self.stocks.brain["next_probs"], res["regime"], res["day"])
+                except FeedError as e:
+                    self.feed_errors.append(f"scout stocks: {e}")
         et = dt.datetime.fromtimestamp(now, ET)
         if (self.acct is not None and self.feed.market_open(self.stocks.proxy) and self.s.kv_get("stock_weights")
                 and self.stocks.propose_due(et.time(), et.date().isoformat())):
@@ -533,6 +557,7 @@ class Engine:
             self._ev(now, "safety", "critical", "KILL SWITCH engaged: no orders", self.kill.reason())
         self.s.kv_set("kill_noted", killed, commit=False)
 
+        self.adopt_watchlist()
         self.brain_step(now)
         if self.stocks:
             self.stock_tick(now, quotes, bs)
@@ -548,6 +573,10 @@ class Engine:
             self.s.kv_set("last_bar", bar_ts)
             if desk:
                 self.snapshot(now, quotes, bs, desk)
+                if self.scout:
+                    probs = self.brain.get("next_probs") or [0.2] * 5
+                    regime = REGIMES[self.brain["regime"]].upper() if "regime" in self.brain else "n/a"
+                    self.scout.scan_crypto(now, bars, desk["mets"], self.desk, probs, regime)
         self.live_scan(now, bars, quotes, live_btc)
         self.s.heartbeat(time.time())
         return desk

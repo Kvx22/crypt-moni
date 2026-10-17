@@ -37,7 +37,7 @@ Python 3.10+ and numpy. From inside the `crypt-moni` folder (Windows: use `py` i
 
 ```bash
 pip install -r requirements.txt
-python -m unittest discover -s tests          # 43 tests, ~40 s
+python -m unittest discover -s tests          # 46 tests, ~70 s
 
 # See it work offline first: three weeks of SIMULATED market in ~45 s
 python run.py demo
@@ -72,6 +72,22 @@ comes from Yahoo Finance's free public endpoint (unofficial; if it ever blocks y
 stock rows just go stale). The dashboard shows stocks in the risk board (filter: All / Crypto / Stocks), a stock-market
 brain card, and a Crypto desk / Stock desk toggle on the learning view. Details in [EXECUTION.md](EXECUTION.md).
 
+### The advisors go looking (opportunity scout)
+
+The board doesn't only judge a fixed list. Every few hours for coins and after each trading day's close for stocks,
+the **scout** pulls market data for a wider field (30 more coins, 50 more ETFs and large caps; edit `scout` in the
+config) and has the five advisors score it with what they have learned so far, standardised against the board's own
+names. A candidate has to clear the desk's BUY/WATCH bar, a liquidity floor, and not be rated EXTREME risk (Imani's
+veto). The shortlist appears on the dashboard with each interested advisor's reasons in numbers, an "AI-exposed" flag
+on names that lean on AI valuations, and a **Watch** button: a watched name joins the board (scanned, scored and
+learned on like the rest, tradable only through the approval-gated process).
+
+Claude does the deeper research. Ask it: **"research the board's opportunities"**. It runs `python run.py scout-export`,
+reads fundamentals, analyst ratings, earnings dates and filings (stocks) or news and token facts (coins) with its
+tools, and records a verdict (favorable, mixed, unfavorable, unverified), reasons and sources with
+`python run.py research SYMBOL --verdict ... --note ... --source URL`. Notes show under each candidate. Leads are not
+recommendations, and the scout never trades.
+
 ### Run it 24/7
 
 | Where | How |
@@ -97,6 +113,7 @@ If you put the dashboard on a server, keep it behind SSH tunnelling or a VPN: it
 | `kill`, `reset-kill`, `reset-breaker` | safety controls. Only a human resets |
 | `outbox`, `approve ID\|all`, `reject ID` | live mode: review and decide proposed orders from the terminal |
 | `export-approved`, `ack`, `rh-snapshot` | live Robinhood: the hand-off Claude uses (EXECUTION.md) |
+| `scout-export`, `research`, `watch`, `unwatch` | the opportunity scout: shortlist for Claude to research, record its notes, manage the watchlist |
 
 ## The five advisors
 

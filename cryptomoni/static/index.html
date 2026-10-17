@@ -105,6 +105,13 @@ th[data-k]{cursor:pointer;user-select:none} th[data-k]:hover{color:var(--fg)} th
 .sig{display:inline-block;font-size:10.5px;border:1px solid var(--line);border-radius:999px;padding:0 6px;margin:1px 2px 1px 0;white-space:nowrap;color:var(--muted)}
 .sig.g{color:var(--good);border-color:var(--good)} .sig.b{color:var(--bad);border-color:var(--bad)} .sig.w{color:var(--warn);border-color:var(--warn)}
 .coin b{font:600 13px var(--mono)}
+.opp td{padding:7px 6px}.opp tr.sub-row td{border-bottom:1px solid var(--line);padding-top:0;color:var(--muted);font-size:12.5px}
+.opp tr.main td{border-bottom:0}
+.rv{font:600 11px var(--mono);border-radius:6px;padding:1px 7px;border:1px solid;white-space:nowrap}
+.rv.favorable{color:var(--good);border-color:var(--good)}.rv.mixed{color:var(--warn);border-color:var(--warn)}.rv.unfavorable{color:var(--bad);border-color:var(--bad)}.rv.unverified{color:var(--muted);border-color:var(--line)}
+.rnote{margin-top:4px;color:var(--fg)}.rnote a{color:var(--accent)}
+.sig.ai{color:var(--warn);border-color:var(--warn)}
+.wl{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
 #rb td.coin,#rb th:first-child{position:sticky;left:0;background:var(--surface);z-index:1}
 .riskbar{display:inline-block;width:38px;height:6px;border-radius:3px;background:var(--line);vertical-align:middle;margin-right:6px;overflow:hidden}.riskbar i{display:block;height:100%}
 /* feeds */
@@ -511,13 +518,40 @@ function outboxHTML(s) {
 }
 function post(u) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN } }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) alert(j.error); S.ver = ""; poll(); }); }
 
+function oppSection(asset, title, o, wl, R, ro) {
+  if (!o) return "";
+  var rows = (o.items || []).map(function (i) {
+    var r = R[i.symbol], on = wl[i.symbol], when = r ? Math.max(0, Math.round((Date.now() / 1000 - r.ts) / 3600)) : 0;
+    var votes = '<span class="vt">' + ORDER.map(function (kk) { var v = i.votes[kk]; return '<i class="' + v + '" style="--c:' + ADV[kk].color + '" title="' + ADV[kk].name + ': ' + ({ y: "likes it", n: "against", a: "no strong view" }[v]) + '"></i>'; }).join("") + '</span>';
+    var act = ro ? "" : on ? '<span class="sub">on the board</span>' : '<button class="ok" data-watch="' + esc(i.symbol) + '">Watch</button>';
+    var tags = (i.ai_exposed ? ' <span class="sig ai" title="leans on AI valuations">AI-exposed</span>' : '') + (r ? ' <span class="rv ' + esc(r.verdict) + '">' + esc(r.verdict) + '</span>' : '');
+    var why = (i.why || []).slice(0, 2).map(function (w) { return '<b style="color:' + ADV[w.key].color + '">' + esc(w.name.split(" ")[0]) + '</b>: ' + esc(w.text); }).join(" · ");
+    var rn = r ? '<div class="rnote"><b>Researched by Claude' + (when ? ' · ' + when + 'h ago' : '') + '</b> · ' + esc(r.note) + (r.catalyst ? ' <span class="sub">Catalyst: ' + esc(r.catalyst) + '</span>' : '')
+      + (r.sources && r.sources.length ? ' ' + r.sources.filter(function (u) { return /^https?:\/\//.test(u); }).map(function (u, k) { return '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">[' + (k + 1) + ']</a>'; }).join(" ") : '') + '</div>' : '';
+    return '<tr class="main"><td class="coin"><b>' + esc(sym(i.symbol)) + '</b>' + tags + '</td><td class="r mono">' + price(i.price) + '</td><td class="r mono ' + cls(i.ret_24h) + '">' + spct(i.ret_24h) + '</td><td class="r mono ' + cls(i.ret_7d) + '">' + spct(i.ret_7d) + '</td>'
+      + '<td style="white-space:nowrap"><span class="tier ' + i.tier + '">' + i.tier + ' ' + Math.round(i.risk) + '</span></td><td class="r mono up">+' + i.score.toFixed(2) + '</td><td>' + votes + '</td><td>' + act + '</td></tr>'
+      + '<tr class="sub-row"><td colspan="8">' + (why || "the advisors see no single standout signal") + rn + '</td></tr>';
+  }).join("");
+  return '<h2 style="margin-top:12px">' + title + ' · ' + o.scanned + ' names scanned ' + (o.ts ? utc(o.ts) + " UTC" : "") + '</h2>'
+    + '<div class="tx"><table class="opp"><thead><tr><th>Name</th><th class="r">Price</th><th class="r">' + (asset == "stock" ? "1d" : "24h") + '</th><th class="r">' + (asset == "stock" ? "5d" : "7d") + '</th><th>Risk</th><th class="r">Desk</th><th>Advisors</th><th></th></tr></thead><tbody>'
+    + (rows || '<tr><td colspan="8" class="sub">No candidate cleared the desk\'s bar this scan.</td></tr>') + '</tbody></table></div>';
+}
+function oppHTML(d) {
+  var o = d.opps; if (!o || (!o.crypto && !o.stock)) return "";
+  var ro = !!STATIC, wlist = d.watchlist || [], wl = {}; wlist.forEach(function (w) { wl[w.symbol] = 1; });
+  var chips = wlist.length ? '<div class="wl"><span class="sub">On the board\'s watchlist:</span>' + wlist.map(function (w) { return '<span class="sig">' + esc(sym(w.symbol)) + (ro ? "" : ' <a href="#" data-unwatch="' + esc(w.symbol) + '" title="remove (takes effect at the next restart)" style="color:var(--muted)">×</a>') + '</span>'; }).join("") + '</div>' : "";
+  return '<div class="card"><h2>Opportunity scout · the advisors look beyond the list</h2>'
+    + '<div class="sub">They screen a wider field with fresh market data, score it with what they have learned so far, and bring back only names that clear the desk\'s BUY/WATCH bar, pass a liquidity floor and are not rated EXTREME risk. These are leads to research, not recommendations. Watch puts a name on the board (scanned and scored like the rest); any trade still needs your approval.</div>'
+    + chips + oppSection("crypto", "Coins", o.crypto, wl, d.research || {}, ro) + oppSection("stock", "Stocks and ETFs", o.stock, wl, d.research || {}, ro) + '</div>';
+}
+
 function tradesHTML() {
   var r = S.trades.map(function (t) { return '<tr><td class="mono">' + utc(t.ts) + '</td><td><span class="b ' + t.side + '">' + t.side + '</span></td><td><b class="mono">' + esc(sym(t.symbol)) + '</b></td><td class="r mono">' + usd(t.notional) + '</td><td class="r mono">' + price(t.price) + '</td><td class="r mono">$' + (t.fee || 0).toFixed(2) + '</td><td class="sub">' + esc(t.reason || "") + '</td></tr>'; }).join("");
   return '<div class="card"><h2>' + (S.state.snapshot && S.state.snapshot.mode == "live" ? "Orders sent" : "Paper trades") + ' · newest first</h2><div class="tw"><table><tr><th>UTC</th><th>Side</th><th>Coin</th><th class="r">Notional</th><th class="r">Price</th><th class="r">Fee</th><th>Why</th></tr>' + (r || '<tr><td colspan="7" class="sub">No paper trades yet.</td></tr>') + '</table></div></div>';
 }
 
 function eventsHTML() {
-  var kinds = ["all", "outbox", "board", "learn", "regime", "safety", "breaker", "broker", "refit", "feed", "minutes"];
+  var kinds = ["all", "scout", "outbox", "board", "learn", "regime", "safety", "breaker", "broker", "refit", "feed", "minutes"];
   var chips = kinds.map(function (k) { return '<button class="chip' + (S.evKind == k ? " on" : "") + '" data-ev="' + k + '">' + k + '</button>'; }).join("");
   var ev = S.events.filter(function (e) { return S.evKind == "all" ? e.kind != "minutes" : e.kind == S.evKind; }).slice(0, 40).map(function (e) {
     return '<div class="ev ' + e.severity + '"><div class="d">' + utc(e.ts) + ' UTC · ' + esc(e.kind) + '</div><div class="t">' + esc(e.title) + '</div><div class="m">' + esc(e.body) + '</div></div>'; }).join("");
@@ -529,7 +563,7 @@ function render(part) {
   var d = S.state, s = d && d.snapshot, L = (d && d.live) || {};
   if (!d) return;
   if (!$("#hdr")) {
-    $("#app").innerHTML = '<div id="hdr"></div><div id="ob"></div><div id="top"></div><div id="rbw"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
+    $("#app").innerHTML = '<div id="hdr"></div><div id="ob"></div><div id="top"></div><div id="rbw"></div><div id="opp"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
       + '<div class="foot">Analysis and simulation tool, not financial advice; decisions and risk are yours. Paper mode places no real orders. The five advisors are original characters, not real people; their lines are generated from the numbers above. Prices: Coinbase public market data (Kraken fallback), or the offline simulator when the banner says so.</div>';
   }
   $("#hdr").innerHTML = headerHTML(d);
@@ -549,6 +583,7 @@ function render(part) {
   }
   $("#rbw").innerHTML = riskBoardHTML(s, L);
   $("#ob").innerHTML = outboxHTML(s);
+  $("#opp").innerHTML = oppHTML(d);
   $("#alw").innerHTML = alertsHTML();
   $("#gd").innerHTML = guardsHTML(d);
   $("#evs").innerHTML = eventsHTML();
@@ -558,6 +593,8 @@ function bind() {
   var k = $("#killbtn"); if (k) k.onclick = function () { if (confirm("Engage the kill switch? No paper order will pass until you clear it with: python run.py reset-kill")) fetch("/api/kill", { method: "POST", headers: { "X-CM": "1" } }).then(function () { S.ver = ""; poll(); }); };
   document.querySelectorAll("#rb th[data-k]").forEach(function (th) { var f = function () { var key = th.dataset.k; S.sort = S.sort.k == key ? { k: key, d: -S.sort.d } : { k: key, d: key == "symbol" ? 1 : -1 }; $("#rbw").innerHTML = riskBoardHTML(S.state.snapshot, S.state.live || {}); bind(); }; th.onclick = f; th.onkeydown = function (e) { if (e.key == "Enter" || e.key == " ") { e.preventDefault(); f(); } }; });
   document.querySelectorAll("#rb tr[data-s]").forEach(function (tr) { tr.onpointermove = function (e) { var m = (S.state.live.coins || []).find(function (c) { return c.symbol == tr.dataset.s; }); if (!m || !m.risk_why) return; showTip(e, "<b>" + esc(sym(m.symbol)) + "</b> risk " + Math.round(m.risk) + " (" + m.tier + ")<br>drivers: " + esc(m.risk_why.join(", ") || "none") + "<br>beta to BTC " + m.beta.toFixed(2) + " · 24h volume $" + (m.usd_vol_24h / 1e6).toFixed(1) + "M"); }; tr.onpointerleave = hideTip; });
+  document.querySelectorAll("[data-watch]").forEach(function (b) { b.onclick = function () { b.disabled = true; post("/api/watch/add/" + encodeURIComponent(b.dataset.watch)); }; });
+  document.querySelectorAll("[data-unwatch]").forEach(function (b) { b.onclick = function (e) { e.preventDefault(); post("/api/watch/remove/" + encodeURIComponent(b.dataset.unwatch)); }; });
   document.querySelectorAll("[data-asset]").forEach(function (b) { b.onclick = function () { S.asset = b.dataset.asset; $("#rbw").innerHTML = riskBoardHTML(S.state.snapshot, S.state.live || {}); bind(); }; });
   document.querySelectorAll("[data-lk]").forEach(function (b) { b.onclick = function () { S.lkind = b.dataset.lk; $("#lrn").innerHTML = learnHTML(S.state.snapshot); bind(); }; });
   document.querySelectorAll("[data-adv]").forEach(function (b) { b.onclick = function () { S.sel = b.dataset.adv; $("#lrn").innerHTML = learnHTML(S.state.snapshot); bind(); }; });

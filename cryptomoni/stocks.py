@@ -133,8 +133,8 @@ class StockBook:
         """Pull completed daily bars; a failing symbol is skipped and retried, never fatal."""
         self.errors = []
         for s in self.symbols:
-            try:
-                bars = self.feed.daily(s, now)
+            try:   # a name added to the watchlist has no history yet: pull two years once
+                bars = self.feed.daily(s, now, "2y" if len(self.closes[s]) < MIN_DAYS + 20 else "3mo")
             except FeedError as e:
                 self.errors.append(f"{s} daily: {e}")
                 continue
@@ -145,6 +145,12 @@ class StockBook:
                 for b in new:
                     self.closes[s][day_str(b.ts)] = b.close
                     self.volumes[s][day_str(b.ts)] = b.volume
+
+    def add(self, symbol):
+        """Adopt a watchlisted stock into the book (its history arrives with the next sync)."""
+        if symbol not in self.symbols:
+            self.symbols.append(symbol)
+            self.closes[symbol], self.volumes[symbol] = {}, {}
 
     def quotes(self, now):
         out = {}
@@ -284,7 +290,8 @@ class StockBook:
         self.s.kv_set("stock_day", day)
         regime = REGIMES[self.brain["regime"]].upper()
         picks = pick_minutes(self.desk, X, avail, mets, regime, S)
-        out = dict(day=day, coins=coins, picks=picks, notes=notes, e=e, weights=weights, verdicts={c["symbol"]: c["verdict"] for c in book})
+        out = dict(day=day, coins=coins, picks=picks, notes=notes, e=e, weights=weights, verdicts={c["symbol"]: c["verdict"] for c in book},
+                   mets=mets, regime=regime)
         self.s.kv_set("stock_last", dict(coins=coins, picks=picks, notes=notes, e=e, day=day), commit=False)
         return out
 

@@ -355,6 +355,94 @@ class TestStocks(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class TestScout(unittest.TestCase):
+    """Runs the scout on the simulator, then exercises research, watchlist adoption and the dashboard route."""
+
+    @classmethod
+    def setUpClass(cls):
+        from cryptomoni.__main__ import build, load_cfg
+        cls.dir = tempfile.mkdtemp()
+        cfg = load_cfg(os.path.join(ROOT, "config.sim.json"))
+        cfg.update(db=os.path.join(cls.dir, "s.db"), daily_csv=os.path.join(ROOT, "data", "BTC-USD.csv"), warmup_days=30,
+                   scout=dict(crypto_hours=1, top=5, crypto=["ATOM-USD", "NEAR-USD", "SUI-USD"], stocks=["QQQ", "NVDA", "TLT"]))
+        cfg["stocks"]["warmup_days"] = 30
+        cfg["safety"]["kill_file"] = os.path.join(cls.dir, "KILL")
+        cfg["tracker"] = dict(n_init=1, n_iter=30)
+        cls.cfg = cfg
+        cls.eng = build(cfg)
+        for _ in range(50):
+            cls.eng.tick()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.eng.s.close()
+        shutil.rmtree(cls.dir)
+
+    def test_scout_finds_candidates_outside_the_board(self):
+        o = self.eng.s.kv_get("opps")
+        self.assertIn("crypto", o)
+        names = {i["symbol"] for i in o["crypto"]["items"]}
+        self.assertTrue(names)
+        self.assertTrue(names <= {"ATOM-USD", "NEAR-USD", "SUI-USD"})            # only what was on the candidate list
+        self.assertFalse(names & set(self.cfg["universe"]))                      # nothing the board already trades
+        adopted = len({"ATOM-USD", "NEAR-USD", "SUI-USD"} & set(self.eng.universe))   # adopted names are no longer "outside"
+        self.assertEqual(o["crypto"]["scanned"], 3 - adopted)
+        from cryptomoni.feeds import FeedError
+        with self.assertRaises(FeedError):                                       # an unknown product is skipped, never fatal
+            self.eng.feed.candles("NOPE-USD", HOUR)
+        for i in o["crypto"]["items"]:
+            self.assertIn(i["verdict"], ("BUY", "WATCH"))
+            self.assertNotEqual(i["tier"], "EXTREME")                            # the chair's veto holds for leads too
+            self.assertEqual(set(i["votes"]), {"vera", "kai", "imani", "marguerite", "idris"})
+        so = o.get("stock")
+        if so:
+            self.assertTrue({i["symbol"] for i in so["items"]} <= {"QQQ", "NVDA", "TLT"})
+            self.assertTrue(all(i["ai_exposed"] for i in so["items"] if i["symbol"] == "NVDA"))
+
+    def test_research_watchlist_and_adoption(self):
+        from cryptomoni.__main__ import main
+        cfgp = os.path.join(self.dir, "c.json")
+        json.dump(self.cfg, open(cfgp, "w"))
+        pick = self.eng.s.kv_get("opps")["crypto"]["items"][0]["symbol"]
+        main(["research", pick, "--config", cfgp, "--verdict", "mixed", "--note", "test note", "--source", "https://example.com"])
+        r = self.eng.s.kv_get("research")[pick]
+        self.assertEqual((r["verdict"], r["by"], r["sources"]), ("mixed", "Claude", ["https://example.com"]))
+        main(["watch", "ZZZ-USD", "--config", cfgp])                                # not on the shortlist: refused
+        self.assertFalse(self.eng.s.kv_get("watchlist", []))
+        main(["watch", pick, "--config", cfgp])
+        self.assertEqual([w["symbol"] for w in self.eng.s.kv_get("watchlist")], [pick])
+        self.assertNotIn(pick, self.eng.universe)
+        self.eng.tick()                                                              # the running scanner adopts it
+        self.assertIn(pick, self.eng.universe)
+        self.assertIn(pick, self.eng.sc.allowlist)
+        main(["unwatch", pick, "--config", cfgp])
+        self.assertFalse(self.eng.s.kv_get("watchlist"))
+
+    def test_dashboard_watch_route_needs_token_and_a_shortlisted_name(self):
+        from http.server import ThreadingHTTPServer
+        from cryptomoni.dashboard import make_handler
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.cfg["db"], self.cfg["safety"]["kill_file"], "tok"))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        pick = self.eng.s.kv_get("opps")["crypto"]["items"][0]["symbol"]
+
+        def post(path, token="tok"):
+            h = {"X-CM": "1"}
+            if token:
+                h["X-CM-Token"] = token
+            try:
+                with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", method="POST", headers=h)) as r:
+                    return r.status
+            except urllib.error.HTTPError as e:
+                return e.code
+        try:
+            self.assertEqual(post(f"/api/watch/add/{pick}", token=None), 403)
+            self.assertEqual(post("/api/watch/add/EVIL-USD"), 404)
+            self.assertEqual(post(f"/api/watch/add/{pick}"), 200)
+            self.assertEqual(post(f"/api/watch/remove/{pick}"), 200)
+        finally:
+            srv.shutdown()
+
+
 class TestEngineEndToEnd(unittest.TestCase):
     """Runs the whole loop on the simulator: scanner -> brain -> advisors -> paper -> store -> dashboard API."""
 
