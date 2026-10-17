@@ -219,7 +219,16 @@ var RC = { crash: "var(--r-crash)", bear: "var(--r-bear)", neutral: "var(--r-neu
 var TC = { LOW: "var(--t-low)", ELEVATED: "var(--t-elevated)", HIGH: "var(--t-high)", EXTREME: "var(--t-extreme)" };
 var SIGN = { mom24: "24h momentum", mom7d: "7-day momentum", ret1h: "last-hour move", trend: "trend vs 3-day avg", breakout: "7-day range position",
   rsi: "RSI", volume: "volume surge", vol: "volatility", drawdown: "drawdown depth", liquidity: "liquidity", beta_tilt: "BTC beta × regime" };
-var TOKEN = new URLSearchParams(location.search).get("t") || "";
+/* The approval token comes from ?t=... in the address. It is remembered in this browser (so a bookmark
+   without it still works) and removed from the address bar once read. */
+var TOKEN = (function () {
+  var t = new URLSearchParams(location.search).get("t") || "";
+  try {
+    if (t) { localStorage.setItem("cm_token", t); history.replaceState(null, "", location.pathname); }
+    else t = localStorage.getItem("cm_token") || "";
+  } catch (e) { /* storage blocked: the ?t= link still works for this visit */ }
+  return t;
+})();
 var S = { outbox: [], state: null, hist: [], trades: [], events: [], alerts: [], range: 168, wkind: "desk", evKind: "all", asset: "all", lkind: "crypto", sort: { k: "score", d: -1 },
   sel: "kai", ver: "", lver: "", talk: 0, paused: false };
 var STATIC = window.CM_STATIC || null;   // set by `run.py export`: a read-only snapshot, no server
@@ -516,7 +525,7 @@ function outboxHTML(s) {
   return '<div class="card ob">' + all + '<h2>Orders awaiting you · nothing is sent until you approve</h2><div class="sub" style="margin-bottom:8px">' + how + ' Unapproved proposals expire after ' + Math.round((s && s.approval_ttl_min) || 120) + ' min and are replaced by the next one.</div>'
     + '<div class="tx"><table><tr><th>ID</th><th>Side</th><th>Coin</th><th class="r">Amount</th><th class="r">Price then</th><th>Desk</th><th>Status</th><th></th><th>Why</th></tr>' + (rows || '<tr><td colspan="9" class="sub">No proposals yet. The board proposes at each rebalance (every ' + ((s && s.guards && s.guards.rebalance_every) || 8) + 'h).</td></tr>') + '</table></div></div>';
 }
-function post(u) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN } }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) alert(j.error); S.ver = ""; poll(); }); }
+function post(u) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN } }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) { if (/token/.test(j.error)) { var t = prompt("Approval token (the CM_TOKEN value in your .env file):"); if (t) { TOKEN = t.trim(); try { localStorage.setItem("cm_token", TOKEN); } catch (e) {} } } else alert(j.error); } S.ver = ""; poll(); }); }
 
 function oppSection(asset, title, o, wl, R, ro) {
   if (!o) return "";
