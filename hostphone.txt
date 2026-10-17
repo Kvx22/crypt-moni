@@ -1,0 +1,77 @@
+HOST PHONE: opening the Risk Board dashboard on your Android phone
+===================================================================
+
+Problem
+-------
+The dashboard loads in the browser on the PC but shows an error on the
+phone over Tailscale.
+
+Cause
+-----
+The dashboard server listens on 127.0.0.1 (this PC only) by default.
+The phone connects to the PC over Tailscale, so the connection is refused.
+The PC browser works because it connects to 127.0.0.1 locally.
+
+Steps
+-----
+1. Find the PC's Tailscale IP.
+   Run this in a PC terminal:
+
+       tailscale ip -4
+
+   It starts with 100.
+
+2. Restart the dashboard, bound to the Tailscale address.
+
+       python run.py up --config config.coinbase.json --host 100.x.x.x
+
+   Replace 100.x.x.x with the IP from step 1.
+   Binding to this address means only devices on your tailnet can reach it.
+   (For Robinhood, use config.robinhood.json instead.)
+
+   Alternative: --host 0.0.0.0 also works, but it listens on your home
+   Wi-Fi too, so the firewall must then restrict it. Or set
+   dashboard.host in the config file.
+
+3. Confirm it is listening on the right address.
+   In a second PC terminal:
+
+       netstat -ano | findstr 8765
+
+   You should see the Tailscale address, not only 127.0.0.1:8765.
+
+4. Allow the port through Windows Firewall if needed.
+   If Windows showed an "allow access" prompt on first start and it was
+   dismissed, add an inbound rule:
+     - Port: TCP 8765
+     - Profile: the one the Tailscale adapter uses (usually Private)
+     - Action: Allow
+
+5. Open the dashboard on the phone.
+   Type this in the Android browser:
+
+       http://100.x.x.x:8765/
+
+   Use http, not https. Include the port.
+   Make sure the phone is connected to the same tailnet.
+   The MagicDNS name (<machine>.taild33bcc.ts.net) only works if MagicDNS
+   is on, so the IP is the safer test.
+
+6. Clear stale state if needed.
+   Close the old tab, or try a private tab. The approval token is stored
+   per address, so the new address may need ?t=<token> added once.
+
+Security
+--------
+- Do not open port 8765 to the public internet.
+- The read endpoints (/api/state, /api/trades, and others) have no login.
+- Approve and reject still require the token.
+- Keep access limited to the tailnet.
+
+If it still fails
+-----------------
+Send these two things:
+  - The exact error text shown on the phone.
+  - The output of: netstat -ano | findstr 8765
+This shows whether the server is listening and whether the problem is the
+network path or the page itself.
