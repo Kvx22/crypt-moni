@@ -238,8 +238,14 @@ class PickDesk:
 
     def decide(self, X, symbols, tiers):
         S = self.predict(X)
-        Z = np.array([zscore(s) for s in S])
+        return S, self.decide_z(np.array([zscore(s) for s in S]), symbols, tiers)
+
+    def decide_z(self, Z, symbols, tiers, penalty=None):
+        """Verdicts from standardised advisor scores Z (advisors x coins). Research can hand in an adjusted Z
+        and a per-coin penalty (subtracted from the combined score, never more than its cap)."""
         combined = self.w @ Z
+        if penalty is not None:
+            combined = combined - np.asarray(penalty, float)
         coins = []
         for i, sym in enumerate(symbols):
             votes = {ADVISORS[a].key: ("y" if Z[a, i] >= self.buy else "n" if Z[a, i] <= self.avoid else "a")
@@ -248,7 +254,7 @@ class PickDesk:
             verdict = self.verdict(c, tiers[i])
             coins.append(dict(symbol=sym, score=c, verdict=verdict, votes=votes,
                               z={ADVISORS[a].key: float(Z[a, i]) for a in range(len(ADVISORS))}))
-        return S, coins
+        return coins
 
     def verdict(self, score, tier):
         if score >= self.buy:

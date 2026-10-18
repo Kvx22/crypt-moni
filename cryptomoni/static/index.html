@@ -111,6 +111,13 @@ th[data-k]{cursor:pointer;user-select:none} th[data-k]:hover{color:var(--fg)} th
 .rv.favorable{color:var(--good);border-color:var(--good)}.rv.mixed{color:var(--warn);border-color:var(--warn)}.rv.unfavorable{color:var(--bad);border-color:var(--bad)}.rv.unverified{color:var(--muted);border-color:var(--line)}
 .rnote{margin-top:4px;color:var(--fg)}.rnote a{color:var(--accent)}
 .sig.ai{color:var(--warn);border-color:var(--warn)}
+.rs-st{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:999px;padding:2px 4px 2px 10px;margin:2px 4px 2px 0;font-size:12px}
+.rs-st b{font-weight:600} .rs-st.active{border-color:var(--good)} .rs-st.active b{color:var(--good)} .rs-st.off b{color:var(--faint)}
+.rs-st button,.rs-fix{font-size:11px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:none;color:var(--muted);cursor:pointer}
+.rs-note{border-top:1px solid var(--line);padding:6px 0;font-size:12.5px} .rs-note .d{font-size:11px;color:var(--faint);font-family:var(--mono)}
+.rs-note a{color:var(--fg)} .rs-form{margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px}
+.rs-form select{font-size:12px;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:1px 4px}
+.thesis{font-size:12px;color:var(--muted);margin-top:3px;max-width:520px}
 .wl{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
 #rb td.coin,#rb th:first-child{position:sticky;left:0;background:var(--surface);z-index:1}
 .riskbar{display:inline-block;width:38px;height:6px;border-radius:3px;background:var(--line);vertical-align:middle;margin-right:6px;overflow:hidden}.riskbar i{display:block;height:100%}
@@ -405,16 +412,22 @@ function signals(m) {
   if (m.rsi >= 75) o.push('<span class="sig b">overbought</span>');
   if (m.rsi <= 25) o.push('<span class="sig g">oversold</span>');
   if (m.vol_ratio >= 1.8) o.push('<span class="sig w">vol expanding</span>');
+  var r = m.research;
+  if (r) {
+    if (r.halted) o.push('<span class="sig b" title="the exchange reports trading halted">halted</span>');
+    if (r.penalty > 0.01) o.push('<span class="sig b" title="research risk flags: ' + esc((r.flags || []).join(", ")) + ' (capped penalty ' + r.penalty.toFixed(2) + (r.applied && r.applied.penalties ? ", applied" : ", shadow") + ')">⚑ ' + esc((r.flags || [])[0] || "risk") + '</span>');
+    if (r.n > 0) o.push('<span class="sig' + (r.score > 0.15 ? " g" : r.score < -0.15 ? " b" : "") + '" title="' + r.n + ' independent sources over ' + (r.kinds || []).length + ' kinds' + (r.top && r.top[0] ? ": " + esc(r.top[0].title) : "") + '">📰 ' + r.n + '</span>');
+  }
   return o.join("") || '<span class="sub">–</span>';
 }
 var COLS = [["symbol", "Coin"], ["price", "Price", "r"], ["ret_1h", "1h", "r", "move since the last hourly close"], ["ret_24h", "24h", "r"], ["ret_7d", "7d", "r"],
   ["risk", "Risk"], ["score", "Desk", "r", "the advisors' weighted score for this coin"], ["verdict", "Verdict"], [null, "Advisors"], [null, "72h"],
   ["vol_24h", "Vol", "r", "24h realised volatility, annualised"], ["rsi", "RSI", "r", "hourly RSI(14)"], ["vol_surge", "Vol×", "r", "last 4h volume vs 7-day average"],
   ["range_pos", "7d range", "", "where the price sits between its 7-day low and high"], [null, "Signals"]];
-var VORD = { BUY: 4, WATCH: 3, NEUTRAL: 2, AVOID: 1, VETOED: 0 };
+var VORD = { BUY: 4, WATCH: 3, NEUTRAL: 2, AVOID: 1, VETOED: 0, HALTED: 0 };
 function riskBoardHTML(s, L) {
   var dec = {}; (s ? s.coins : []).forEach(function (c) { dec[c.symbol] = c; });
-  var all = (L.coins || []).map(function (m) { var c = dec[m.symbol] || {}; return Object.assign({}, m, { score: c.score, verdict: c.verdict, votes: c.votes, conviction: c.conviction }); });
+  var all = (L.coins || []).map(function (m) { var c = dec[m.symbol] || {}; return Object.assign({}, m, { score: c.score, verdict: c.verdict, votes: c.votes, conviction: c.conviction, research: c.research }); });
   var nStk = all.filter(function (m) { return m.asset == "stock"; }).length;
   var rows = S.asset == "all" ? all : all.filter(function (m) { return (m.asset == "stock") == (S.asset == "stock"); });
   var k = S.sort.k, d = S.sort.d;
@@ -518,13 +531,65 @@ function outboxHTML(s) {
     var left = (o.status == "pending" || o.status == "approved") && !exp ? ' · ' + Math.max(0, Math.round((o.expires_ts - now) / 60)) + ' min left' : '';
     return '<tr><td class="mono">#' + o.id + '</td><td><span class="b ' + o.side + '">' + o.side + '</span></td><td><b class="mono">' + esc(sym(o.symbol)) + '</b></td><td class="r mono">' + usd(o.notional) + '</td>'
       + '<td class="r mono">' + price(o.ref_price) + '</td><td>' + (o.verdict ? '<span class="vd ' + esc(o.verdict) + '">' + esc(o.verdict) + '</span>' : '') + '</td>'
-      + '<td><span class="st ' + st + '">' + st + left + '</span>' + (o.detail ? '<div class="sub">' + esc(o.detail) + '</div>' : '') + '</td><td style="white-space:nowrap">' + act + '</td><td class="sub">' + esc(o.reason || "") + '</td></tr>';
+      + '<td><span class="st ' + st + '">' + st + left + '</span>' + (o.detail ? '<div class="sub">' + esc(o.detail) + '</div>' : '') + '</td><td style="white-space:nowrap">' + act + '</td><td class="sub">' + esc(o.reason || "") + oboxResearch(o) + '</td></tr>';
   }).join("");
   var all = !ro && open_.length > 1 ? '<button class="ok" id="apprall" data-n="' + open_.length + '" data-t="' + Math.round(tot) + '" style="float:right">Approve all ' + open_.length + ' · ' + usd(tot) + '</button>' : '';
   var how = s && s.broker == "robinhood" ? "Approved Robinhood orders are placed by Claude: in the Claude app, say <b>place the approved crypto board orders</b>." : "Approved orders are re-checked against fresh prices (±2%), the kill switch and every safety limit, then sent as market orders.";
   return '<div class="card ob">' + all + '<h2>Orders awaiting you · nothing is sent until you approve</h2><div class="sub" style="margin-bottom:8px">' + how + ' Unapproved proposals expire after ' + Math.round((s && s.approval_ttl_min) || 120) + ' min and are replaced by the next one.</div>'
     + '<div class="tx"><table><tr><th>ID</th><th>Side</th><th>Coin</th><th class="r">Amount</th><th class="r">Price then</th><th>Desk</th><th>Status</th><th></th><th>Why</th></tr>' + (rows || '<tr><td colspan="9" class="sub">No proposals yet. The board proposes at each rebalance (every ' + ((s && s.guards && s.guards.rebalance_every) || 8) + 'h).</td></tr>') + '</table></div></div>';
 }
+function oboxResearch(o) {
+  var r = null; try { r = o.research ? JSON.parse(o.research) : null; } catch (e) {}
+  var out = "";
+  if (r && r.flags && r.flags.length) out += '<div><span class="sig b">⚑ research flags: ' + esc(r.flags.join(", ")) + '</span></div>';
+  if (o.thesis) out += '<div class="thesis">' + esc(o.thesis) + '</div>';
+  return out;
+}
+function postJSON(u, body) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) { if (/token/.test(j.error)) { var t = prompt("Approval token (the CM_TOKEN value in your .env file):"); if (t) { TOKEN = t.trim(); try { localStorage.setItem("cm_token", TOKEN); } catch (e) {} } } else alert(j.error); } S.rts = 0; pollResearch(); return j; }); }
+
+/* ---------- research: the 24/7 workers, what they found, and which pieces are switched on ---------- */
+var STAGE_HELP = { penalties: "capped score penalties from credible risk flags (never a hard veto)", signals: "research features in each advisor's score, with learned weights", watchlist: "advisors add names to the watch-only list", cadence: "the board proposes every 2 hours instead of every rebalance" };
+function researchHTML() {
+  var R = S.research, s = S.state && S.state.snapshot, sr = (s && s.research) || {};
+  if (!R || !R.available) return sr.enabled === false ? "" : '<div class="card"><h2>Research service</h2><div class="sub">No research database yet. It starts with <span class="mono">python run.py up</span> and fills within minutes.</div></div>';
+  var ro = !!STATIC, h = R.health || {}, c = h.counts || {}, c24 = h.counts24 || {}, age = R.service_age;
+  var live = age != null && age < 120;
+  var head = '<div class="row"><h2>Research service · 24/7 workers, ' + (c.active || 0) + ' active, ' + (c.standby || 0) + ' standby' + (c.failed ? ', <span style="color:var(--bad)">' + c.failed + ' failed</span>' : '') + (c.grown ? ', ' + c.grown + ' grown' : '') + '</h2><span class="sub">' + (live ? '<span style="color:var(--good)">running</span> · beat ' + ago(age) : '<span style="color:var(--warn)">not running</span>' + (age != null ? ' · last beat ' + ago(age) : '')) + ' · 24h: ' + (c24.items || 0) + ' items → ' + (c24.notes || 0) + ' notes · ' + (c24.open_requests || 0) + ' open requests</span></div>';
+  var stages = Object.keys(STAGE_HELP).map(function (k) { var st = (R.stages[k] || {}).state || "shadow", ev = (R.evidence || {})[k] || {};
+    var btn = ro ? "" : st == "active" ? '<button data-stage="' + k + '" data-to="shadow" title="back to shadow: logged, not applied">shadow</button>' : st == "shadow" ? '<button data-stage="' + k + '" data-to="on" title="switch on now, without waiting for the evidence gate">switch on</button>' : '<button data-stage="' + k + '" data-to="auto">auto</button>';
+    return '<span class="rs-st ' + st + '" title="' + esc(STAGE_HELP[k] + (ev.waiting || ev.reason ? " · " + (ev.waiting || ev.reason) : "")) + '">' + k + ' <b>' + st + '</b>' + btn + '</span>'; }).join("");
+  var teams = Object.keys(h.teams || {}).sort().map(function (t) { var x = h.teams[t]; return '<tr><td><b>' + esc(t) + '</b></td><td class="r mono">' + (x.active || 0) + '</td><td class="r mono">' + (x.standby || 0) + '</td><td class="r mono' + (x.failed ? '" style="color:var(--bad)' : '') + '">' + (x.failed || 0) + '</td><td class="mono">' + ago(x.last_ok ? R.now - x.last_ok : null) + '</td></tr>'; }).join("");
+  var failed = (h.slots || []).filter(function (x) { return x.state == "failed"; }).slice(0, 6).map(function (x) { return '<div class="sub">✗ <b>' + esc(x.adapter) + '</b>: ' + esc((x.err || "").slice(0, 140)) + '</div>'; }).join("");
+  var cats = (R.taxonomy || {}).catalysts || [], flags = (R.taxonomy || {}).flags || [];
+  var notes = (R.notes || []).slice(0, 25).map(function (n) {
+    var dir = n.direction > 0 ? '<span class="sig g">+ ' + esc(n.catalyst) + '</span>' : n.direction < 0 ? '<span class="sig b">− ' + esc(n.catalyst) + '</span>' : '<span class="sig">' + esc(n.catalyst) + '</span>';
+    var fl = (n.risk_flags || []).map(function (f) { return '<span class="sig b">⚑ ' + esc(f) + '</span>'; }).join("");
+    var link = /^https?:\/\//.test(n.url) ? '<a href="' + esc(n.url) + '" target="_blank" rel="noopener noreferrer">' + esc(n.title) + '</a>' : esc(n.title);
+    var fix = ro ? "" : ' <button class="rs-fix" data-fix="' + n.id + '">' + (n.labelled ? "relabel" : "fix") + '</button>';
+    var form = S.fixing == n.id ? '<div class="rs-form">catalyst <select id="fx-c">' + cats.map(function (c) { return '<option' + (c == n.catalyst ? " selected" : "") + '>' + c + '</option>'; }).join("") + '</select> direction <select id="fx-d">' + [[1, "bullish"], [0, "neutral"], [-1, "bearish"]].map(function (d) { return '<option value="' + d[0] + '"' + (d[0] == n.direction ? " selected" : "") + '>' + d[1] + '</option>'; }).join("") + '</select> flags ' + flags.map(function (f) { return '<label><input type="checkbox" class="fx-f" value="' + f + '"' + ((n.risk_flags || []).indexOf(f) >= 0 ? " checked" : "") + '> ' + f + '</label>'; }).join(" ") + ' <button class="rs-fix" data-save="' + n.id + '">save</button> <button class="rs-fix" data-fix="">cancel</button></div>' : "";
+    return '<div class="rs-note"><div class="d">#' + n.id + ' · ' + utc(n.ts, true) + ' UTC · ' + esc(n.publisher) + ' · ' + esc(n.evidence) + ' · labelled by ' + esc(n.label_by) + (n.quarantine ? ' · forever-search (unverified)' : '') + '</div><b class="mono">' + esc(sym(n.symbol)) + '</b> ' + dir + fl + ' ' + link + fix + form + '</div>';
+  }).join("");
+  var wo = (sr.watch_only || []).map(function (p) { return '<span class="sig" title="' + esc(p.reason) + '">' + esc(sym(p.symbol)) + ' · ' + esc(ADV[p.advisor] ? ADV[p.advisor].name.split(" ")[0] : p.advisor) + (ro ? "" : ' <a href="#" data-watch="' + esc(p.symbol) + '" title="add to the board (tradable, every order still needs your approval)">+ board</a>') + '</span>'; }).join("");
+  var shadowP = (R.proposals || []).filter(function (p) { return p.status == "shadow"; }).slice(0, 8).map(function (p) { return '<span class="sig" title="' + esc(p.reason) + '">' + esc(sym(p.symbol)) + ' · ' + esc(ADV[p.advisor] ? ADV[p.advisor].name.split(" ")[0] : p.advisor) + '</span>'; }).join("");
+  var disc = (R.discovered || []).filter(function (x) { return x.status != "invalid"; }).slice(0, 12).map(function (x) { return '<span class="sig" title="' + esc(x.reason || "") + ' (' + esc((x.sources || []).join(", ")) + ')">' + esc(sym(x.symbol)) + ' ×' + x.mentions + (x.status == "validated" ? " ✓" : "") + '</span>'; }).join("");
+  var models = (R.models || []).filter(function (m) { return m.role == "champion"; }).map(function (m) { var mm = m.metrics || {}; return '<div class="sub"><b>' + esc(m.name) + ' v' + m.version + '</b>: ' + (m.name == "extractor" ? 'catalyst F1 ' + (mm.cat_macro_f1 || 0).toFixed(2) + ', direction ' + pct(mm.dir_acc) + ' on ' + (mm.n || 0) + ' held-out labels' : 'held-out log-loss ' + (mm.logloss_challenger || mm.logloss || 0).toFixed(3) + ' on ' + (mm.n_holdout || 0) + ' notes') + '</div>'; }).join("");
+  var pt = sr.pretrain, cad = sr.cadence && sr.cadence.stats;
+  var ptc = pt && pt.crypto, ptx = ptc ? 'replayed ' + (ptc.hours || 0) + ' hours (' + (ptc.rounds || 0) + ' graded rounds); holdout IC: replayed desk ' + ((ptc.challenger || {}).ic || 0).toFixed(3) + ' vs instinct ' + ((ptc.prior || {}).ic || 0).toFixed(3) + (ptc.champion ? ' vs live ' + (ptc.champion.ic || 0).toFixed(3) : '') + '. ' + (ptc.reason || '') : (pt && pt.error ? 'failed: ' + pt.error : '');
+  var extra = (ptx ? '<div class="sub"><b>Pretraining</b> (' + (pt.ts ? utc(pt.ts) : '') + '): ' + esc(ptx) + '</div>' : '')
+    + (cad && cad.days ? '<div class="sub"><b>2-hour cadence paper book</b> over ' + cad.days.toFixed(1) + ' days: ' + spct(cad.cad_ret) + ' (' + (cad.cad_trades || 0) + ' trades, fees ' + usd(cad.cad_fees) + ') vs today\'s cadence ' + spct(cad.base_ret) + ' (' + (cad.base_trades || 0) + ' trades)' + (sr.cadence_live ? ' · <b style="color:var(--good)">live</b>' : '') + '</div>' : '');
+  return '<div class="card">' + head
+    + '<div style="margin:6px 0">' + stages + '</div><div class="sub">Every piece starts in <b>shadow</b>: logged and scored, not applied. A piece switches on by itself only when its evidence gate passes, one at a time; you can switch it now or send it back. Nothing here can place an order, and every proposal still needs your approval.</div>'
+    + '<div class="grid g2e" style="margin-top:10px"><div><h2>Teams</h2><div class="tx"><table><tr><th>Team</th><th class="r">Active</th><th class="r">Standby</th><th class="r">Failed</th><th>Last OK</th></tr>' + (teams || '<tr><td colspan="5" class="sub">starting…</td></tr>') + '</table></div>' + failed
+    + (wo ? '<h2 style="margin-top:10px">Advisors\' watch-only list</h2><div>' + wo + '</div>' : '') + (shadowP ? '<h2 style="margin-top:10px">Would add (shadow)</h2><div>' + shadowP + '</div>' : '')
+    + (disc ? '<h2 style="margin-top:10px">Discovered names</h2><div>' + disc + '</div>' : '') + (models || extra ? '<h2 style="margin-top:10px">Models</h2>' + models + extra : '') + '</div>'
+    + '<div><h2>Latest notes · fix a wrong label and the extractor learns from it</h2><div class="tw">' + (notes || '<div class="sub">No notes yet.</div>') + '</div></div></div></div>';
+}
+function pollResearch() {
+  if (STATIC) { S.research = STATIC.research; return; }
+  var now = Date.now(); if (S.rts && now - S.rts < 15000) return; S.rts = now;
+  get("/api/research").then(function (r) { S.research = r; if (S.fixing == null) { $("#rsr") && ($("#rsr").innerHTML = researchHTML()); bind(); } }).catch(function () {});
+}
+
 function post(u) { return fetch(u, { method: "POST", headers: { "X-CM": "1", "X-CM-Token": TOKEN } }).then(function (r) { return r.json(); }).then(function (j) { if (j.error) { if (/token/.test(j.error)) { var t = prompt("Approval token (the CM_TOKEN value in your .env file):"); if (t) { TOKEN = t.trim(); try { localStorage.setItem("cm_token", TOKEN); } catch (e) {} } } else alert(j.error); } S.ver = ""; poll(); }); }
 
 function oppSection(asset, title, o, wl, R, ro) {
@@ -572,7 +637,7 @@ function render(part) {
   var d = S.state, s = d && d.snapshot, L = (d && d.live) || {};
   if (!d) return;
   if (!$("#hdr")) {
-    $("#app").innerHTML = '<div id="hdr"></div><div id="ob"></div><div id="top"></div><div id="rbw"></div><div id="opp"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
+    $("#app").innerHTML = '<div id="hdr"></div><div id="ob"></div><div id="top"></div><div id="rbw"></div><div id="opp"></div><div id="rsr"></div><div class="grid g2e" id="mid"><div id="alw"></div><div id="lrn"></div></div><div id="wts"></div><div id="prf"></div><div class="grid g2e"><div id="bk"></div><div id="gd"></div></div><div class="grid g2e"><div id="trd"></div><div id="evs"></div></div>'
       + '<div class="foot">Analysis and simulation tool, not financial advice; decisions and risk are yours. Paper mode places no real orders. The five advisors are original characters, not real people; their lines are generated from the numbers above. Prices: Coinbase public market data (Kraken fallback), or the offline simulator when the banner says so.</div>';
   }
   $("#hdr").innerHTML = headerHTML(d);
@@ -593,6 +658,7 @@ function render(part) {
   $("#rbw").innerHTML = riskBoardHTML(s, L);
   $("#ob").innerHTML = outboxHTML(s);
   $("#opp").innerHTML = oppHTML(d);
+  if (S.fixing == null) $("#rsr").innerHTML = researchHTML();
   $("#alw").innerHTML = alertsHTML();
   $("#gd").innerHTML = guardsHTML(d);
   $("#evs").innerHTML = eventsHTML();
@@ -616,6 +682,12 @@ function bind() {
     var o = S.outbox.find(function (x) { return x.id == b.dataset.oid; });
     if (b.dataset.act == "approve" && !confirm("Approve #" + o.id + ": " + o.side + " " + sym(o.symbol) + " for about $" + Math.round(o.notional) + "?")) return;
     b.disabled = true; post("/api/outbox/" + b.dataset.oid + "/" + b.dataset.act); }; });
+  document.querySelectorAll("[data-stage]").forEach(function (b) { b.onclick = function () { if (confirm("Set research " + b.dataset.stage + " to " + b.dataset.to + "?")) postJSON("/api/research/stage/" + b.dataset.stage + "/" + b.dataset.to, {}); }; });
+  document.querySelectorAll("[data-fix]").forEach(function (b) { b.onclick = function () { S.fixing = b.dataset.fix ? +b.dataset.fix : null; $("#rsr").innerHTML = researchHTML(); bind(); }; });
+  document.querySelectorAll("[data-save]").forEach(function (b) { b.onclick = function () {
+    var fl = []; document.querySelectorAll(".fx-f").forEach(function (x) { if (x.checked) fl.push(x.value); });
+    var id = b.dataset.save; S.fixing = null;
+    postJSON("/api/research/label/" + id, { catalyst: $("#fx-c").value, direction: +$("#fx-d").value, flags: fl }); }; });
   var p = $("#cappause"); if (p) p.onclick = function () { S.paused = !S.paused; p.textContent = S.paused ? "resume" : "pause"; if (!S.paused) say(); };
 }
 
@@ -671,5 +743,5 @@ function poll() {
     });
   }).catch(function (e) { $("#app").innerHTML = '<div class="empty">Cannot reach the dashboard server: ' + esc(e) + '</div>'; });
 }
-poll(); if (!STATIC) setInterval(poll, 2000);
+poll(); pollResearch(); if (!STATIC) { setInterval(poll, 2000); setInterval(pollResearch, 15000); }
 </script></body></html>

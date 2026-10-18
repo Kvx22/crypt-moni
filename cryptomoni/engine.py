@@ -34,6 +34,22 @@ from .scout import Scout
 from .stocks import StockBook
 
 
+def _research(cfg, log):
+    """The board's research hooks, or None. Research is advisory and fail-safe: any import or
+    database problem leaves the board running exactly as it did without research."""
+    from .research.link import ResearchLink, research_cfg
+    if not research_cfg(cfg).get("enabled", True):
+        return None
+    try:
+        return ResearchLink(cfg, log)
+    except Exception as e:  # noqa: BLE001
+        log(time.time(), "research", "warn", "Research unavailable", repr(e)[:300])
+        return None
+
+
+BENCH_OF = {"crypto": "BTC-USD", "stock": "SPY"}
+
+
 def day_str(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).date().isoformat()
 
@@ -105,6 +121,23 @@ class Engine:
         self.brain = store.kv_get("brain") or {}
         self.errors = 0
         self.feed_errors = []
+        self.halted = set()
+        self.research = _research(cfg, self._ev)
+        self.rx = self.srx = None
+        if self.research:
+            from .research.overlay import BoardResearch
+            self.rx = BoardResearch(self.research, store, "rdesk", "crypto", "4h")
+            if self.stocks:
+                self.srx = BoardResearch(self.research, store, "stock_rdesk", "stock", "1d")
+                self.stocks.rx = self.srx
+        if self.scout and self.research:
+            self.scout.extra = self.discovered_candidates
+        from .research.cadence import CadenceBooks
+        self.cadence_rules = dict(dict(every_hours=2, min_conviction=0.35, cooldown_hours=6, max_trades_per_day=6),
+                                  **(cfg.get("cadence") or {}))
+        self.cadence = CadenceBooks(cfg, store)
+        self.pretrain_job = None
+        self.research_service = None      # simulator only: the research service stepped in-process
         self.load_daily()
         self.adopt_watchlist()
 
@@ -259,11 +292,20 @@ class Engine:
                 continue
             fwd = [math.log(closes[p["syms"][k]] / p["close"][k]) for k in idx]
             res = self.desk.learn(np.array(p["X"])[idx], np.array(p["S"])[:, idx], fwd)
+            if self.rx:
+                self.rx.learn(p, idx, fwd)
             graded.append(dict(ts=p["ts"], res=res))
-        # 2) make new calls
+        # 2) make new calls (research adjusts them only where its stage is switched on)
         tiers = [mets[s]["tier"] for s in syms]
         S, coins = self.desk.decide(X, syms, tiers)
-        keep.append(dict(ts=bar_ts, syms=syms, close=[closes[s] for s in syms], X=X.round(5).tolist(), S=S.round(6).tolist()))
+        entry = dict(ts=bar_ts, syms=syms, close=[closes[s] for s in syms], X=X.round(5).tolist(), S=S.round(6).tolist())
+        if self.rx:
+            try:
+                coins = self.rx.apply(now, self.desk, S, syms, tiers, closes, closes.get(self.proxy), entry)
+                self.halted = set(self.rx.halted) | (self.srx.halted if self.srx else set())
+            except Exception as ex:  # noqa: BLE001  (research must never stop the desk)
+                self._ev(now, "research", "warn", "Research overlay skipped this hour", repr(ex)[:300])
+        keep.append(entry)
         self.s.kv_set("pending", keep[-(self.horizon + 4):], commit=False)
         self.s.kv_set("desk", self.desk.state())
         conv = self.s.kv_get("conviction", {})
@@ -294,9 +336,11 @@ class Engine:
                 weights = {k: v * (1 - self.stocks.share) for k, v in weights.items()}
             self.s.kv_set("weights_crypto", weights, commit=False)
             self.s.kv_set("verdicts_crypto", {c["symbol"]: c["verdict"] for c in book}, commit=False)
+            self.s.kv_set("votes_crypto", {c["symbol"]: c["votes"] for c in coins}, commit=False)
             merged = self.merged_weights()
             self.s.kv_set("weights", merged, commit=False)
-            due = (bar_ts // HOUR) % self.rebalance_every == 0 or prev_e is None or bs.exposure_cap < (prev_e or 0) - 0.01
+            every = self.cadence_rules["every_hours"] if self.cadence_live(now) else self.rebalance_every
+            due = (bar_ts // HOUR) % every == 0 or prev_e is None or bs.exposure_cap < (prev_e or 0) - 0.01
             if due and self.acct is not None:
                 fills = self.send_book(now, merged, quotes, bs)
             self.s.kv_set("e", e)
@@ -333,6 +377,135 @@ class Engine:
         v.update(self.s.kv_get("stock_verdicts", {}))
         return v
 
+    # ------------------------------------------------------------------ research hooks
+    def cadence_live(self, now):
+        """True once the 2-hour cadence has earned its switch (its stage is active)."""
+        return bool(self.research and self.research.active("cadence", now))
+
+    def convictions(self):
+        c = dict(self.s.kv_get("conviction", {}))
+        c.update(self.s.kv_get("stock_conv", {}))
+        return c
+
+    def cadence_filter_live(self, now, orders):
+        from .research.cadence import cadence_filter
+        if self.approve:
+            last = {}
+            for (sym, _side), t in self.s.last_sent().items():
+                last[sym] = max(last.get(sym, 0.0), t or 0.0)
+            n_today = self.s.executed_since(day_ts(day_str(now)))[0]
+        else:
+            last = {}
+            for k, t in self.s.kv_get("last_order", {}).items():
+                sym = k.split("|")[0]
+                last[sym] = max(last.get(sym, 0.0), t)
+            n_today = self.s.kv_get("day", {}).get("orders", 0)
+        keep, dropped = cadence_filter(orders, self.convictions(), last, n_today, now, self.cadence_rules)
+        if dropped:
+            self._ev(now, "outbox", "info", f"Cadence held back {len(dropped)} order(s)",
+                     "; ".join(f"{o.side} {o.symbol}: {why}" for o, why in dropped[:8]))
+        return keep
+
+    def research_case(self, order, verdict, regime):
+        """(compact research dict, written thesis) for a proposed order. Display only."""
+        rx = self.srx if order.symbol in self.stock_set else self.rx
+        info = (rx.last.get(order.symbol) if rx else None) or None
+        compact = None
+        if info:
+            compact = {k: info.get(k) for k in ("n", "kinds", "score", "penalty", "flags", "thin", "halted", "top", "applied")}
+        try:
+            from .research.thesis import write
+            dec = next((c for c in (self.s.kv_get("stock_last") or {}).get("coins", []) if c["symbol"] == order.symbol), None) \
+                if order.symbol in self.stock_set else None
+            votes = (dec or {}).get("votes") or self.s.kv_get("votes_crypto", {}).get(order.symbol, {})
+            thesis = write(order.symbol, order.side, verdict, votes, (info or {}).get("view"), str(regime).upper(),
+                           notional=order.notional_usd)
+        except Exception:  # noqa: BLE001  (a thesis is decoration; never let it stop a proposal)
+            thesis = None
+        return compact, thesis
+
+    def discovered_candidates(self, asset):
+        """Up to 20 names the research service discovered (most mentioned first) for the scout to score."""
+        rows = self.research.discovered(asset) if self.research else []
+        rows.sort(key=lambda r: -(r.get("mentions") or 0))
+        return [r["symbol"] for r in rows[:20]]
+
+    def after_scout(self, now, asset, items, quotes):
+        """Discovery bookkeeping, then the advisors' watch-only proposals (shadow until the stage is on)."""
+        if not self.research or items is None:
+            return
+        found = {r["symbol"] for r in self.research.discovered(asset)}
+        for sym in found & self.scout.failed.get(asset, set()):
+            self.research.mark_discovered(sym, "invalid", "no market data for it on the board's feeds")
+        for sym in found & {i["symbol"] for i in items}:
+            self.research.mark_discovered(sym, "validated", "scored by the scout")
+        active = self.research.active("watchlist", now)
+        views = self.research.views([i["symbol"] for i in items], now)
+        bench = BENCH_OF[asset]
+        b0 = (quotes.get(bench) or (None,))[0]
+        for i in items:
+            v = views.get(i["symbol"]) or {}
+            if (v.get("penalty") or 0) >= 0.1 or v.get("halted"):
+                continue   # research has a credible risk flag on it: no advisor proposes it
+            for a in ADVISORS:
+                z = (i.get("z") or {}).get(a.key)
+                if i["votes"].get(a.key) != "y" or z is None or z < self.research.rc["watch_min_z"]:
+                    continue
+                why = next((w["text"] for w in i.get("why", []) if w["key"] == a.key), "")
+                self.research.propose_watch(now, i["symbol"], asset, a.key, float(z), why or f"{a.name} likes it", active, i.get("price"), b0)
+
+    def research_summary(self, now):
+        """What the board shows about research: switches, service health, learned research weights."""
+        if not self.research:
+            return dict(enabled=False)
+        age = self.research.service_heartbeat(now)
+        return dict(enabled=True, board=self.research.board, stages=self.research.stages(now), service_age=age,
+                    error=self.research.err, desk=self.rx.view() if self.rx else None,
+                    stock_desk=self.srx.view() if self.srx else None, pretrain=self.s.kv_get("pretrain"),
+                    cadence=self.cadence.view() if self.cadence else None, cadence_live=self.cadence_live(now),
+                    watch_only=[dict(symbol=p["symbol"], asset=p["asset"], advisor=p["advisor"], z=p["z"], reason=p["reason"], ts=p["ts"])
+                                for p in self.research.watch_only()[:20]])
+
+    def research_hourly(self, now, bar_ts, quotes):
+        """Subscription, the cadence paper books, discovery bookkeeping and the pretraining timer."""
+        if self.research:
+            subs = {s: "crypto" for s in self.universe}
+            subs.update({s: "stock" for s in self.stock_set})
+            for p in self.research.watch_only():
+                subs.setdefault(p["symbol"], p["asset"])
+            self.research.subscribe(subs, now)
+        try:
+            self.cadence.step(now, bar_ts, self.merged_weights(), self.convictions(), quotes, self.plan)
+            if self.research:
+                self.research.put_kv("cadence", self.cadence.stats(now))
+        except Exception as ex:  # noqa: BLE001
+            self._ev(now, "research", "warn", "Cadence books skipped this hour", repr(ex)[:300])
+        self.pretrain_tick(now)
+
+    def pretrain_tick(self, now):
+        from .research.pretrain import PretrainJob, apply
+        # on by default for real feeds; the simulator only pretrains when its config asks (tests stay fast and exact)
+        pc = dict(dict(enabled=not self.feed.simulated, hours=2160, every_hours=168), **(self.cfg.get("pretrain") or {}))
+        if not pc["enabled"]:
+            return
+        job = self.pretrain_job
+        if job is not None:
+            res = job.poll()
+            if res is not None:
+                self.pretrain_job = None
+                try:
+                    apply(self, res, now)
+                except Exception as ex:  # noqa: BLE001
+                    self._ev(now, "learn", "warn", "Pretraining result not applied", repr(ex)[:300])
+                self.s.kv_set("pretrain_ts", now)
+            return
+        last = self.s.kv_get("pretrain_ts")
+        fresh = self.desk.rounds < 48 and last is None
+        if fresh or (last is not None and now - last >= pc["every_hours"] * HOUR):
+            self.pretrain_job = PretrainJob(self, hours=pc["hours"])
+            self.pretrain_job.start(now)
+            self.s.kv_set("pretrain_ts", now)
+
     def send_book(self, now, weights, quotes, bs):
         """Paper: straight through the gate. Live: into the approval outbox."""
         if self.approve:
@@ -348,8 +521,9 @@ class Engine:
             self.s.kv_set("weights", self.merged_weights(), commit=False)
             if self.scout:
                 try:
-                    self.scout.scan_stocks(now, res["mets"], self.stocks.closes[self.stocks.proxy], self.stocks.desk,
-                                           self.stocks.brain["next_probs"], res["regime"], res["day"])
+                    items = self.scout.scan_stocks(now, res["mets"], self.stocks.closes[self.stocks.proxy], self.stocks.desk,
+                                                   self.stocks.brain["next_probs"], res["regime"], res["day"])
+                    self.after_scout(now, "stock", items, quotes)
                 except FeedError as e:
                     self.feed_errors.append(f"scout stocks: {e}")
         et = dt.datetime.fromtimestamp(now, ET)
@@ -381,6 +555,8 @@ class Engine:
                 continue
             if sym in self.stock_set and not self.feed.market_open(sym):
                 continue   # stocks only trade in the session
+            if sym in self.halted:
+                continue   # the exchange reports trading halted: no orders either way until it resumes
             cur = acct.positions.get(sym, {}).get("value", 0.0)
             diff = weights.get(sym, 0.0) * acct.equity - cur
             if abs(diff) < max(self.min_trade, self.band * acct.equity):
@@ -420,6 +596,8 @@ class Engine:
             return []
         day = self.s.kv_get("day", {})
         orders = self.plan(acct, weights, quotes)
+        if self.cadence_live(now):
+            orders = self.cadence_filter_live(now, orders)
         ctx = self._ctx(now, acct, quotes, bs)
         out = []
         for o in orders:
@@ -454,17 +632,23 @@ class Engine:
         ctx = self._ctx(now, acct, quotes, bs)
         regime = REGIMES[self.brain["regime"]] if "regime" in self.brain else "n/a"
         made = []
-        for o in self.plan(acct, weights, quotes):
+        orders = self.plan(acct, weights, quotes)
+        if self.cadence_live(now):
+            orders = self.cadence_filter_live(now, orders)
+        for o in orders:
             v = self.gate.check(o, ctx)
             if not v.ok:
                 self._ev(now, "safety", "warn", f"Not proposed: {o.side} {o.symbol} ${o.notional_usd:,.0f}", "; ".join(v.reasons), o.d())
                 continue
             SafetyGate.commit(v, ctx)
+            info, thesis = self.research_case(v.order, verdicts.get(o.symbol, ""), regime)
             oid = self.s.add_outbox(now, now + self.ttl, v.order, quotes[o.symbol][0], regime,
-                                    verdicts.get(o.symbol, ""), self.broker.name)
-            made.append(dict(id=oid, symbol=o.symbol, side=o.side, notional_usd=v.order.notional_usd, status="pending"))
+                                    verdicts.get(o.symbol, ""), self.broker.name, thesis=thesis, research=info)
+            made.append(dict(id=oid, symbol=o.symbol, side=o.side, notional_usd=v.order.notional_usd, status="pending",
+                             flags=(info or {}).get("flags") or []))
         if made:
-            lines = [f"#{m['id']} {m['side']} {m['symbol'].split('-')[0]} ${m['notional_usd']:,.0f}" for m in made]
+            lines = [f"#{m['id']} {m['side']} {m['symbol'].split('-')[0]} ${m['notional_usd']:,.0f}"
+                     + (f" (research flags: {', '.join(m['flags'])})" if m["flags"] else "") for m in made]
             self._ev(now, "outbox", "info", f"{len(made)} order(s) await your approval ({self.broker.name})",
                      "; ".join(lines) + f". They expire in {self.ttl / 60:.0f} min.")
             push(self.cfg, f"Crypto Risk Board: {len(made)} order(s) to approve", "\n".join(lines), self.dash_url)
@@ -569,14 +753,21 @@ class Engine:
         bar_ts = bars[self.proxy][-1].ts if bars.get(self.proxy) else None
         desk = None
         if bar_ts is not None and bar_ts != self.s.kv_get("last_bar"):
+            if self.research_service is not None:
+                try:
+                    self.research_service.step(now)
+                except Exception as ex:  # noqa: BLE001
+                    self._ev(now, "research", "warn", "Simulated research step failed", repr(ex)[:300])
             desk = self.desk_step(now, bar_ts, bars, quotes, bs)
             self.s.kv_set("last_bar", bar_ts)
+            self.research_hourly(now, bar_ts, quotes)
             if desk:
                 self.snapshot(now, quotes, bs, desk)
                 if self.scout:
                     probs = self.brain.get("next_probs") or [0.2] * 5
                     regime = REGIMES[self.brain["regime"]].upper() if "regime" in self.brain else "n/a"
-                    self.scout.scan_crypto(now, bars, desk["mets"], self.desk, probs, regime)
+                    items = self.scout.scan_crypto(now, bars, desk["mets"], self.desk, probs, regime)
+                    self.after_scout(now, "crypto", items, quotes)
         self.live_scan(now, bars, quotes, live_btc)
         self.s.heartbeat(time.time())
         return desk
@@ -691,6 +882,7 @@ class Engine:
                         max_turnover=self.sc.max_daily_turnover_pct, max_quote_age=self.sc.max_quote_age_s,
                         rebalance_every=self.rebalance_every),
             fills=desk["fills"],
+            research=self.research_summary(now),
         )
         self.s.add_snapshot(snap)
         return snap

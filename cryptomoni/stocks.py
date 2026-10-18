@@ -117,6 +117,7 @@ class StockBook:
         al.update(sc.get("allocator", {}))
         self.alloc = Allocator(**al)
         self.brain = store.kv_get("stock_brain") or {}
+        self.rx = None          # research overlay (set by the engine when research is on)
         self.errors = []
         self.closes, self.volumes, self.fetched = {}, {}, {}
         for s in self.symbols:
@@ -257,8 +258,17 @@ class StockBook:
                 continue
             fwd = [math.log(closes[p["syms"][k]] / p["close"][k]) for k in idx]
             graded.append(self.desk.learn(np.array(p["X"])[idx], np.array(p["S"])[:, idx], fwd))
-        S, coins = self.desk.decide(X, avail, [mets[s]["tier"] for s in avail])
-        keep.append(dict(day=day, syms=avail, close=[closes[s] for s in avail], X=X.round(5).tolist(), S=S.round(6).tolist()))
+            if self.rx:
+                self.rx.learn(p, idx, fwd)
+        tiers = [mets[s]["tier"] for s in avail]
+        S, coins = self.desk.decide(X, avail, tiers)
+        entry = dict(day=day, syms=avail, close=[closes[s] for s in avail], X=X.round(5).tolist(), S=S.round(6).tolist())
+        if self.rx:
+            try:
+                coins = self.rx.apply(now, self.desk, S, avail, tiers, closes, closes.get(self.proxy), entry)
+            except Exception as ex:  # noqa: BLE001  (research must never stop the stock desk)
+                self.log(now, "research", "warn", "Research overlay skipped for stocks today", repr(ex)[:300])
+        keep.append(entry)
         self.s.kv_set("stock_pending", keep[-(self.horizon + 3):], commit=False)
         self.s.kv_set("stock_desk", self.desk.state(), commit=False)
         conv = self.s.kv_get("stock_conv", {})

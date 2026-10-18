@@ -34,6 +34,10 @@ class Store:
         if not readonly:
             self.c.execute("PRAGMA journal_mode=WAL")
             self.c.executescript(SCHEMA)
+            cols = {r[1] for r in self.c.execute("PRAGMA table_info(outbox)")}
+            for col in ("thesis", "research"):   # added with the research service; older databases get them here
+                if col not in cols:
+                    self.c.execute(f"ALTER TABLE outbox ADD COLUMN {col} TEXT")
             self.c.commit()
 
     def close(self):
@@ -130,10 +134,12 @@ class Store:
         return out
 
     # ---- outbox: proposed real orders that wait for a human --------------------------
-    def add_outbox(self, ts, expires, o, ref_price, regime, verdict, broker):
-        cur = self.c.execute("""INSERT INTO outbox(created_ts,expires_ts,symbol,side,notional,ref_price,reason,regime,verdict,broker,status)
-                                VALUES(?,?,?,?,?,?,?,?,?,?,'pending')""",
-                             (ts, expires, o.symbol, o.side, o.notional_usd, ref_price, o.reason, regime, verdict, broker))
+    def add_outbox(self, ts, expires, o, ref_price, regime, verdict, broker, thesis=None, research=None):
+        """`thesis` is a display-only written case; `research` a small dict (flags, sources) shown with the order."""
+        cur = self.c.execute("""INSERT INTO outbox(created_ts,expires_ts,symbol,side,notional,ref_price,reason,regime,verdict,broker,status,
+                                thesis,research) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+                             (ts, expires, o.symbol, o.side, o.notional_usd, ref_price, o.reason, regime, verdict, broker,
+                              thesis, json.dumps(research) if research is not None else None))
         oid = cur.lastrowid
         self.c.execute("UPDATE outbox SET client_order_id=? WHERE id=?", (f"cm-{int(ts)}-{oid}", oid))
         self.c.commit()

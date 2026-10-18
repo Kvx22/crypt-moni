@@ -36,6 +36,19 @@ class Scout:
         self.ai = set(sc.get("ai_exposed", AI_EXPOSED))
         self.s, self.feed, self.log = store, feed, log
         self.proxy = cfg.get("market_proxy", "BTC-USD")
+        self.extra = None                 # research discovery: fn(asset) -> extra candidate symbols
+        self.failed = {"crypto": set(), "stock": set()}   # candidates the feed had no data for (last scan)
+
+    def candidates(self, asset):
+        """The configured candidate list plus names the research service discovered."""
+        base = self.crypto if asset == "crypto" else self.stocks
+        extra = []
+        if self.extra:
+            try:
+                extra = [x for x in self.extra(asset) if x not in base]
+            except Exception:  # noqa: BLE001  (discovery is optional)
+                extra = []
+        return list(base) + extra
 
     # ------------------------------------------------------------------ helpers
     def known(self):
@@ -69,7 +82,7 @@ class Scout:
                     # scores are relative to the field, so say where each number sits against the other names
                     rel = lambda g: " (above the field)" if X[i, SIGNALS.index(g)] > 0 else " (below the field)"
                     why.append(dict(key=adv.key, name=adv.name, text=" and ".join(describe_signal(g, m, regime) + rel(g) for g in sigs)))
-            items.append(dict(symbol=sym, asset=asset, score=c["score"], verdict=c["verdict"], votes=c["votes"], why=why,
+            items.append(dict(symbol=sym, asset=asset, score=c["score"], verdict=c["verdict"], votes=c["votes"], why=why, z=c.get("z", {}),
                               ai_exposed=sym in self.ai, **{k: m[k] for k in KEEP if k in m}))
         items.sort(key=lambda x: -x["score"])
         items = items[: self.top]
@@ -93,12 +106,14 @@ class Scout:
         skip = set(uni_mets) | self.known()
         btc = bars.get(self.proxy)
         cm, scanned = {}, 0
-        for sym in self.crypto:
+        self.failed["crypto"] = set()
+        for sym in self.candidates("crypto"):
             if sym in skip:
                 continue
             try:
                 b = self.feed.candles(sym, HOUR)
             except FeedError:
+                self.failed["crypto"].add(sym)
                 continue
             scanned += 1
             if len(b) >= MIN_BARS:
@@ -114,12 +129,14 @@ class Scout:
         self.s.kv_set("scout_stock_day", day)
         skip = set(uni_mets) | self.known()
         cm, scanned = {}, 0
-        for sym in self.stocks:
+        self.failed["stock"] = set()
+        for sym in self.candidates("stock"):
             if sym in skip:
                 continue
             try:
                 bars = self.feed.daily(sym, now, "1y")
             except FeedError:
+                self.failed["stock"].add(sym)
                 continue
             scanned += 1
             if len(bars) >= MIN_DAYS:

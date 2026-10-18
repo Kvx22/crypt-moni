@@ -88,6 +88,20 @@ tools, and records a verdict (favorable, mixed, unfavorable, unverified), reason
 `python run.py research SYMBOL --verdict ... --note ... --source URL`. Notes show under each candidate. Leads are not
 recommendations, and the scout never trades.
 
+### The research service (24/7, no Claude needed)
+
+`up` also starts a **research service** shared by both boards: 20 workers and 20 standbys in six teams (catalysts,
+risk, filings, market structure, sentiment, discovery) read crypto news feeds, Google/Bing News per name, SEC filings
+and insider Form 4s, exchange trading status and incident pages, perpetual funding and order books, StockTwits,
+Reddit and fear-and-greed readings, plus a sandboxed **forever search**. Everything becomes a labelled note
+(catalyst, direction, risk flags) that the five advisors weigh with their own learned research weights. Positive
+research needs four independent sources over two kinds of evidence; credible risk flags give a capped penalty, not a
+veto; an advisor who likes a thinly covered name files a research request. Notes are scored at 1h to 7d, sources earn
+reliability, and the extractor and outcome models retrain on your PC with champion-vs-challenger gating. Every piece
+starts in **shadow** and switches on by itself, one at a time, only when its evidence passes. The advisors are also
+pretrained on months of history, and a 2-hour-cadence paper book runs beside the board. Research never places an
+order. Details and commands: [RESEARCH.md](RESEARCH.md). First thing on your PC: `python run.py research-probe`.
+
 ### Run it 24/7
 
 | Where | How |
@@ -114,6 +128,7 @@ If you put the dashboard on a server, keep it behind SSH tunnelling or a VPN: it
 | `outbox`, `approve ID\|all`, `reject ID` | live mode: review and decide proposed orders from the terminal |
 | `export-approved`, `ack`, `rh-snapshot` | live Robinhood: the hand-off Claude uses (EXECUTION.md) |
 | `scout-export`, `research`, `watch`, `unwatch` | the opportunity scout: shortlist for Claude to research, record its notes, manage the watchlist |
+| `research-status`, `research-probe`, `research-stage`, `research-label`, `research-train`, `pretrain` | the research service: health, a live check of every source, the shadow/active switches, label corrections, training ([RESEARCH.md](RESEARCH.md)) |
 
 ## The five advisors
 

@@ -17,6 +17,14 @@ Opportunity scout (the advisors look beyond the board's own list):
                                          attach a research note (what Claude does after researching a candidate)
   watch SYMBOL | unwatch SYMBOL          put a shortlisted name on the board's watchlist (or take it off)
 
+Research service (starts with `up`; shared by both boards; nothing it does can place an order):
+  research-status                        workers, teams, stages, models and the latest notes
+  research-probe [--team T]              fetch every source once and report what answered (run this on your PC)
+  research-stage [NAME on|off|shadow|auto]  see or switch the research pieces (penalties, signals, watchlist, cadence)
+  research-label NOTE_ID --catalyst C --direction -1|0|1 [--flags a,b]   correct a note (trains the extractor)
+  research-train                         train the extractor and outcome model now (champion/challenger)
+  pretrain                               replay history so the advisors start trained (also runs on its own)
+
 Live mode (config.coinbase.json / config.robinhood.json): the board proposes, you approve.
   outbox                                 list proposed / approved / sent orders
   approve ID|all, reject ID              same rules as the dashboard buttons
@@ -63,7 +71,18 @@ def build(cfg, fresh=False):
                 cs = read_closes(os.path.join(sd, f"{sym}.csv"))
                 if cs:
                     anchors[sym] = cs[next(reversed(cs))]
-    return Engine(cfg, make_feed(cfg, anchors), Store(db))
+    feed = make_feed(cfg, anchors)
+    if f.get("kind") == "sim":   # simulated research starts fresh with the simulated market
+        from .research.db import research_path
+        for ext in ("", "-wal", "-shm"):
+            if os.path.exists(research_path(cfg) + ext):
+                os.remove(research_path(cfg) + ext)
+    eng = Engine(cfg, feed, Store(db))
+    if f.get("kind") == "sim" and eng.research:
+        # the simulator has no real clock: its research service runs in-process, stepped by the engine
+        from .research.service import Service
+        eng.research_service = Service(cfg, db=eng.research.db, world=feed, clock=feed.now, log=lambda *a: None)
+    return eng
 
 
 def print_board(st):
@@ -96,12 +115,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="run.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["up", "scan", "dashboard", "watchdog", "demo", "once", "status", "export", "doctor", "backtest",
                                     "kill", "reset-kill", "reset-breaker", "outbox", "approve", "reject",
-                                    "export-approved", "ack", "rh-snapshot", "scout-export", "research", "watch", "unwatch"])
+                                    "export-approved", "ack", "rh-snapshot", "scout-export", "research", "watch", "unwatch",
+                                    "research-service", "research-status", "research-probe", "research-stage", "research-label",
+                                    "research-train", "pretrain"])
+    ap.add_argument("--team", default=None)
+    ap.add_argument("--direction", type=int, default=None)
+    ap.add_argument("--flags", default="")
+    ap.add_argument("--no-research", action="store_true")
     ap.add_argument("--verdict", choices=["favorable", "mixed", "unfavorable", "unverified"], default="unverified")
     ap.add_argument("--note", default="")
     ap.add_argument("--source", action="append", default=[])
     ap.add_argument("--catalyst", default="")
     ap.add_argument("id", nargs="?", default=None)
+    ap.add_argument("state", nargs="?", default=None)
     ap.add_argument("--status", choices=["sent", "failed"], default=None)
     ap.add_argument("--order-id", default="")
     ap.add_argument("--detail", default="")
@@ -144,9 +170,15 @@ def main(argv=None):
         return live_cmds(a, cfg, kill_file)
     if a.cmd in ("scout-export", "research", "watch", "unwatch"):
         return scout_cmds(a, cfg)
+    if a.cmd.startswith("research-") or a.cmd == "pretrain":
+        from .research.cli import research_cmds
+        return research_cmds(a, cfg, cfg_path)
+    from .research.db import research_path
+    from .research.link import board_name
+    rdb, board = research_path(cfg), board_name(cfg)
     if a.cmd == "dashboard":
         from .dashboard import serve
-        return serve(cfg["db"], kill_file, port, host, token)
+        return serve(cfg["db"], kill_file, port, host, token, rdb, board)
     if a.cmd == "watchdog":
         from .watchdog import run
         w = cfg.get("watchdog", {})
@@ -184,15 +216,23 @@ def main(argv=None):
         print_board(eng.s)
         return print(f"\nOpen the board: python run.py dashboard --config {cfg_path}")
     scan_s = cfg.get("scan_seconds", 60)
+    sup = None
     if a.cmd == "up":
         from .dashboard import serve
-        threading.Thread(target=serve, args=(cfg["db"], kill_file, port, host, token), daemon=True).start()
+        threading.Thread(target=serve, args=(cfg["db"], kill_file, port, host, token, rdb, board), daemon=True).start()
+        if eng.research and not a.no_research and getattr(eng, "research_service", None) is None:
+            from .research.service import ServiceSupervisor
+            sup = ServiceSupervisor(os.path.abspath(cfg_path), cfg, eng._ev).start()
+            print(f"Research service supervised (log: {sup.log_path})", flush=True)
     how = (f"LIVE on {eng.broker.name}: every order waits for your approval" if eng.approve else "paper only")
     print(f"Scanning {len(eng.universe)} coins every {scan_s}s, 24/7 ({eng.feed.kind} feed, {how}). Ctrl+C to stop.", flush=True)
     try:
         eng.run_forever(scan_s)
     except KeyboardInterrupt:
         print("stopped")
+    finally:
+        if sup:
+            sup.stop()
 
 
 def scout_cmds(a, cfg):
@@ -324,6 +364,13 @@ def export(cfg, out):
                            watchlist=st.kv_get("watchlist", []), heartbeat_age=None, kill=False,
                            kill_reason="", version=st.counts()),
                 history=st.history(2000), trades=st.trades(80), events=events, alerts=st.alerts(60))
+    from .dashboard import research_state
+    from .research.db import research_path
+    from .research.link import board_name
+    try:
+        data["research"] = research_state(research_path(cfg), board_name(cfg), 30)
+    except Exception:  # noqa: BLE001  (an export never fails over research)
+        data["research"] = dict(available=False)
     with open(os.path.join(STATIC, "index.html"), encoding="utf-8") as f:
         html = f.read()
     style = re.search(r"<style>.*?</style>", html, re.S).group(0)
