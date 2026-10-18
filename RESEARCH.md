@@ -96,9 +96,9 @@ sticks until you change it). The dashboard's Research card has the same buttons.
 
 ## The advisors start trained
 
-On a fresh start, and weekly after that, the board replays up to 90 days of hourly history so the pick desk
+With a real feed, on a fresh start and weekly after that, the board replays up to 90 days of hourly history so the pick desk
 starts from what worked rather than from instinct. The replayed desk is used only if it beat the instinct-only
-desk (and, once the live desk has learned, the live desk too) on the most recent fifth of that history.
+desk (and, once the live desk has learned, the live desk too) on the most recent fifth of that history. (The simulator only pretrains when its config sets `"pretrain": {"enabled": true}`.)
 
 ## The 2-hour cadence, in paper first
 
