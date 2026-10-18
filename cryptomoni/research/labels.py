@@ -95,6 +95,7 @@ _CAT_RULES = [
     ("regulatory", 2, r"\b(?:sec|cftc|finra|fca|regulators?|watchdog|supervisor|authority|commission|ministry|agency)\b (?:\w+ ){0,2}(?:approv\w*|reject\w*|den(?:y|ies|ied)|ban\w*|charg\w*|fines?|fined|sues?|sued|su(?:ing)|warns?|orders?|grants?|licen[cs]\w*|clears?|cleared|halts?|suspends?|blocks?|probes?|investigat\w*)\b"),
     ("regulatory", 2, r"\b(?:wells notice|cease[- ]and[- ]desist|enforcement action|consent order|licen[cs]e (?:granted|revoked|approved|application)|regulatory approval|banned|ban on|outlaws?)\b"),
     ("regulatory", 1, r"\b(?:regulator|regulators|regulatory|compliance|licen[cs]e|lawmakers|legislation|bill passes|stablecoin bill|framework)\b"),
+    ("regulatory", 0.5, r"\bapprov(?:al|es|ed)\b"),
     ("legal", 2, r"\b(?:lawsuit|class action|sues|sued|suing|settle(?:s|d|ment)?|court (?:rules|ruling|rejects|approves|dismisses|orders)|judge|jury|verdict|indicted|indictment|pleads? guilty|convicted|sentenced|subpoena|antitrust)\b"),
     ("legal", 2, r"\b(?:chapter (?:11|7|15)|files? for (?:bankruptcy|insolvency|creditor protection)|bankruptcy (?:filing|court|protection)|insolven(?:t|cy)|liquidators?|receivership|administrators? appointed)\b"),
     ("legal", 1, r"\b(?:investigation|probe|charges|charged|allegations|alleged|fraud|court|legal|attorney general|prosecutors?|arrested)\b"),
@@ -170,7 +171,7 @@ _FLAG_RULES = {
         r"\b(?:attackers?|hackers?|thieves|exploiters?) (?:\w+ ){0,2}(?:drain(?:ed|s)?|st(?:ole|eal|eals)|made off with|siphon(?:ed|s)?|emptied|took)\b",
         _N + r" (?:\w+ ){0,3}(?:stolen|drained|siphoned|lost) (?:in|from|after|during) (?:a |an |the )?(?:\w+ ){0,3}(?:hack|exploit|attack|breach|heist)",
         _N + r" (?:\w+ ){0,2}(?:stolen|drained|siphoned)\b",
-        r"\b(?:suffers?|suffered|hit by|victim of|falls? victim to|confirms?|confirmed) (?:a |an )?(?:\w+ ){0,2}(?:exploit|hack|breach|attack|heist)\b",
+        r"\b(?:suffers?|suffered|hit by|victim of|falls? victim to|confirms?|confirmed) (?:a |an )?(?:" + _N + r" )?(?:\w+ ){0,2}(?:exploit|hack|breach|attack|heist)\b",
         r"\b(?:bridge|protocol|exchange|wallet|vault|pool) (?:\w+ ){0,2}(?:drained|exploited|hacked)\b",
         r"\b(?:private keys? (?:were )?(?:compromised|leaked|stolen)|rug[- ]pull(?:ed)?)\b",
     ],
@@ -189,6 +190,7 @@ _FLAG_RULES = {
         r"\b(?:to |will |plans to |set to )?de-?list(?:s|ed|ing)?\b(?! (?:risk|fears?|concerns?)\b)",
         r"\b(?:delisting|non-?compliance|deficiency) notice\b|\b(?:ends|ending|to end) (?:spot |margin )?trading for\b",
         r"\b(?:removed|removes|removing|dropped|drops) (?:\w+ ){0,3}from (?:the )?(?:\w+ ){0,2}(?:exchange|platform)\b",
+        r"\b(?:removed|removes|removing|drops|dropped|ends|ending) (?:\w+ ){0,3}trading pairs?\b",
     ],
     "fraud": [
         r"\b(?:charged with|accused of|indicted (?:for|on)|convicted of|guilty (?:of|to)|charges? of|alleging|alleges) (?:\w+ ){0,3}(?:fraud|wire fraud|securities fraud|market manipulation|misappropriat\w*|embezzl\w*)\b",
@@ -209,7 +211,7 @@ _FLAG_RULES = {
         r"\b(?:secondary|follow-on|at-the-market|registered direct|discounted) (?:share |stock |equity )?offering\b",
         r"\b(?:unlocks?|unlocking|release[sd]?) (?:of )?(?:about |roughly |nearly |over |some )?(?:\d[\d.,]*%|" + _N + r") (?:\w+ ){0,4}(?:of (?:\w+ ){0,2}(?:supply|tokens|circulating)|tokens|worth|in tokens)",
         r"\b(?:large|massive|major|huge|biggest|record|cliff) (?:token )?unlock\b|\bunlock (?:of|worth|equal to) " + _N,
-        r"\b(?:issues?|issuing|sells?|selling) " + _N + r" (?:new |additional )?shares\b|\bdilut(?:es|ion|ive) (?:\w+ ){0,2}(?:shareholders|holders)\b",
+        r"\b(?:issues?|issuing) " + _N + r" (?:new |additional )?shares\b|\b(?:sells?|selling) " + _N + r" (?:new|additional) shares\b|\bdilut(?:es|ion|ive) (?:\w+ ){0,2}(?:shareholders|holders)\b",
     ],
     "outage": [
         r"\b(?:outage|outages|downtime|service disruption|degraded performance)\b",
@@ -230,11 +232,13 @@ _POST_NEG = re.compile(r"^\W*(?:\w+\W+){0,3}?(?:denied|false|unfounded|debunked|
 _HYPOTHETICAL = re.compile(r"\b(?:could|may|might|would|if|whether|risks?|fears?|feared|potential|possible|possibly|"
                            r"how|avoid|prevent|protect|lessons?|guide|tips|threat of|rumou?rs?|unconfirmed|speculation|"
                            r"what happens|scenario|history of|biggest|worst|years? ago|last year|since the|anniversary)\b", re.I)
-_GENERIC_TITLE = re.compile(r"^\s*(?:how to|how do|what is|what are|what's|why (?:do|does|is|are)|explainer|explained|"
+_GENERIC_TITLE = re.compile(r"^\s*(?:how (?:to|do|does|can|you|hackers|hacks|exploits|scams)|what is|what are|what's|why (?:do|does|is|are|a|an|the next)|explainer|explained|"
                             r"guide|opinion|op-ed|analysis:|commentary|column|q&a|faq|the (?:\d+ )?(?:biggest|worst|best)|"
-                            r"\d+ (?:ways|things|tips|lessons|reasons)|a (?:brief )?history|lessons from|ask )\b", re.I)
+                            r"\d+ (?:ways|things|tips|lessons|reasons)|a (?:brief )?history|lessons from|ask )\b|\b(?:explained|explainer|what you need to know|a primer)\W*$", re.I)
 _RESOLVED = re.compile(r"\b(?:restor(?:es|ed|ing)|back online|resum(?:es|ed|ing)|resolved|recover(?:s|ed)|reopen(?:s|ed)|"
                        r"lifts? (?:the )?halt|after (?:a |an |the )?(?:brief |short |\d+-hour )?(?:outage|halt|downtime))\b", re.I)
+# a halt or outage cue in a sentence that says it is over is not bad news any more
+_DOWN_CUE = re.compile(r"outage|downtime|halt|frozen|freez|offline|stopped producing|paus|suspend", re.I)
 _SENT_BREAK = re.compile(r"[.;!?|\n–—]|\s-\s|:\s")
 _WORD = re.compile(r"[\w'$%-]+")
 
@@ -256,8 +260,8 @@ def _before(s, start, words=4):
     return " ".join(_WORD.findall(seg)[-words:])
 
 
-def _negated(s, m):
-    return bool(_NEGATORS.search(_before(s, m.start()))) or bool(_POST_NEG.match(s[m.end():m.end() + 40]))
+def _negated(s, m, words=4):
+    return bool(_NEGATORS.search(_before(s, m.start(), words))) or bool(_POST_NEG.match(s[m.end():m.end() + 40]))
 
 
 def _hypothetical(s, m):
@@ -290,7 +294,7 @@ def _flags(title, body):
                 continue
             for rx in rxs:
                 for m in rx.finditer(part):
-                    if _negated(part, m) or _hypothetical(part, m):
+                    if _negated(part, m, words=6) or _hypothetical(part, m):
                         continue
                     if flag in ("outage", "halt") and _RESOLVED.search(_sentence(part, m)):
                         continue
@@ -340,6 +344,8 @@ def rule_label(title, text="") -> dict:
             for m in rx.finditer(part):
                 neg = _negated(part, m)
                 s = -sign if (neg and sign > 0) else (0 if neg else sign)
+                if s < 0 and _DOWN_CUE.search(m.group(0)) and _RESOLVED.search(_sentence(part, m)):
+                    s = 0
                 if s:
                     dscore += s * w * mult
                     if not dcue or mult == 2.0 and abs(w) >= 2:
@@ -349,9 +355,11 @@ def rule_label(title, text="") -> dict:
     if flags:   # a credible flag is bad news whatever else the story says
         direction = -1
 
+    if _GENERIC_TITLE.search(title):   # explainers, how-tos and opinion: general colour, not an event
+        return dict(catalyst="other", direction=0, risk_flags=[], confidence=0.55, why="general piece: no specific event")
     if not score:
-        return dict(catalyst="other", direction=direction if flags else 0, risk_flags=flags, confidence=CONF_MIN,
-                    why=_short(dcue) if flags else "")
+        return dict(catalyst="other", direction=int(direction), risk_flags=flags, confidence=CONF_MIN,
+                    why=(f"{'+' if direction > 0 else '-'}: “{_short(dcue)}”" if direction else "")[:WHY_MAX])
     ranked = sorted(score.items(), key=lambda kv: (-kv[1], CATALYSTS.index(kv[0])))
     best_cat, best = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
