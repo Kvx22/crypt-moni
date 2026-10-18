@@ -55,7 +55,7 @@
   },
   "safety": {
     "mode": "live",
-    "max_per_trade_usd": null,
+    "max_per_trade_usd": 25,
     "on_cap_exceeded": "clamp",
     "max_position_pct": {
       "BTC-USD": 0.5,
@@ -63,7 +63,7 @@
     },
     "default_max_position_pct": 0.15,
     "kill_file": "data/KILL",
-    "live_armed": false
+    "live_armed": true
   },
   "watchdog": {
     "poll": 60,
@@ -75,16 +75,14 @@
     "port": 8765
   },
   "conviction_hours": 12,
+  "research": { "contact": "kadehamilton704@gmail.com" },
   "execution": {
     "broker": "coinbase",
     "key_file": "secrets/cdp_api_key.json",
-    "quote_currency": "USD",
+    "quote_currency": "USDC",
     "approval_ttl_min": 120,
     "approve_token": null,
-    "ntfy_topic": null,
-    "dashboard_url": null
-  },
-  "research": {
-    "contact": "kadehamilton704@gmail.com"
+    "ntfy_topic": "exe-williset",
+    "dashboard_url": "http://laptop-gd3bov98.taild33bcc.ts.net:8765/?t=exe-williset"
   }
 }
