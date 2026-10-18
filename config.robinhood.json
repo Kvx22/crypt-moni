@@ -105,5 +105,8 @@
     "propose_at": "10:00",
     "horizon_days": 2,
     "conviction_days": 3
+  },
+  "research": {
+    "contact": "kadehamilton704@gmail.com"
   }
 }

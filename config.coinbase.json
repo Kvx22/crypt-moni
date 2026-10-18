@@ -83,5 +83,8 @@
     "approve_token": null,
     "ntfy_topic": null,
     "dashboard_url": null
+  },
+  "research": {
+    "contact": "kadehamilton704@gmail.com"
   }
 }
