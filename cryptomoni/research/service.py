@@ -177,6 +177,7 @@ class Service:
             relabel_recent(self.db, self.model, self.alias_table(), now)
         else:
             self.db.set_model_role("extractor", v, "rejected")
+        self.db.prune_model_blobs("extractor")
         return dict(version=v, promoted=wins, reason=why, metrics=cm)
 
     # ---- one pass of everything that is due -------------------------------------------------
@@ -251,6 +252,11 @@ class Service:
     def gap_check(self, now):
         from .aggregate import team_coverage
         cov = team_coverage(self.db, now, self.subscribed())
+        # risk, discovery and filings only speak when something happens: quiet is normal for them, so
+        # only a team with no working sources counts as a gap there (not a lack of fresh notes)
+        for team in ("risk", "discovery", "filings"):
+            if isinstance(cov.get(team), dict):
+                cov[team]["symbols_covered"] = cov[team].get("symbols_total", 0)
         self.pool.gap_check(now, cov)   # it logs its own events
         return cov
 

@@ -462,6 +462,11 @@ class ResearchDB:
                 self.c.execute("ROLLBACK")
                 raise
 
+    def prune_model_blobs(self, name, keep=3):
+        """Drop the stored weights of every non-champion version except the newest `keep` (metrics stay)."""
+        self.x("""UPDATE models SET blob=NULL WHERE name=? AND role!='champion' AND blob IS NOT NULL AND version NOT IN
+                  (SELECT version FROM models WHERE name=? ORDER BY version DESC LIMIT ?)""", (name, name, keep))
+
     def set_model_role(self, name, version, role):
         self.x("UPDATE models SET role=? WHERE name=? AND version=?", (role, name, version))
 

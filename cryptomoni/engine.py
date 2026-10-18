@@ -140,6 +140,7 @@ class Engine:
         self.research_service = None      # simulator only: the research service stepped in-process
         self.load_daily()
         self.adopt_watchlist()
+        self.research_subscribe(self.feed.now())   # research starts on the board's names right away
 
     # ------------------------------------------------------------------ utils
     def _ev(self, ts, kind, sev, title, body="", payload=None):
@@ -466,14 +467,18 @@ class Engine:
                     watch_only=[dict(symbol=p["symbol"], asset=p["asset"], advisor=p["advisor"], z=p["z"], reason=p["reason"], ts=p["ts"])
                                 for p in self.research.watch_only()[:20]])
 
-    def research_hourly(self, now, bar_ts, quotes):
-        """Subscription, the cadence paper books, discovery bookkeeping and the pretraining timer."""
+    def research_subscribe(self, now):
+        """Tell the research service what this board wants watched (its names plus the watch-only list)."""
         if self.research:
             subs = {s: "crypto" for s in self.universe}
             subs.update({s: "stock" for s in self.stock_set})
             for p in self.research.watch_only():
                 subs.setdefault(p["symbol"], p["asset"])
             self.research.subscribe(subs, now)
+
+    def research_hourly(self, now, bar_ts, quotes):
+        """Subscription, the cadence paper books, discovery bookkeeping and the pretraining timer."""
+        self.research_subscribe(now)
         try:
             self.cadence.step(now, bar_ts, self.merged_weights(), self.convictions(), quotes, self.plan)
             if self.research:

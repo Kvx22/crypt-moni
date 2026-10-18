@@ -106,6 +106,7 @@ class TestResearchOnTheBoard(unittest.TestCase):
         self.assertTrue(all(not c["research"]["applied"]["signals"] for c in coins))
         set_manual(db, "penalties", "auto")
         self.eng.research._stages_ts = 0
+        self.eng.tick()   # leave the board's latest snapshot back in shadow for the tests that follow
 
     def test_broken_research_database_does_not_stop_the_board(self):
         link = self.eng.research
