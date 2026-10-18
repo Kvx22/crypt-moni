@@ -568,8 +568,16 @@ class TestBooks(Base):
         self.assertGoodItem(sol)
         self.assertEqual((sol.direction, sol.confidence, sol.catalyst, sol.kind), (1, 0.5, "market_structure", "market"))
         self.assertEqual(sol.url, f"data://coinbase_book/SOL-USD/{HOUR}")
-        self.assertAlmostEqual(sol.facts["bid_usd"], 900_000, delta=1)
-        self.assertAlmostEqual(sol.facts["imbalance"], 7 / 11, places=3)
+        # USD depth is price * size per level; the fixture's levels sit 0.05%..0.86% below/above mid, so the
+        # notional is a little under the nominal 900k/200k (and the 5%-away walls never count)
+        bk = routes[cb_book_url("SOL-USD")]
+        bid = sum(float(p) * float(s) for p, s, _ in bk["bids"] if float(p) >= 200.0 * 0.99)
+        ask = sum(float(p) * float(s) for p, s, _ in bk["asks"] if float(p) <= 200.0 * 1.01)
+        self.assertAlmostEqual(sol.facts["bid_usd"], bid, delta=1)
+        self.assertAlmostEqual(sol.facts["ask_usd"], ask, delta=1)
+        self.assertAlmostEqual(sol.facts["bid_usd"], 900_000, delta=900_000 * 0.006)
+        self.assertAlmostEqual(sol.facts["imbalance"], (bid - ask) / (bid + ask), places=3)
+        self.assertAlmostEqual(sol.facts["imbalance"], 7 / 11, delta=0.005)
         self.assertIn("leans to buyers", sol.title)
         self.assertEqual(items["DOGE-USD"].direction, -1)
 

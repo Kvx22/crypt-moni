@@ -114,6 +114,22 @@ def _et_ts(day, hour, minute=0):
     return naive + _et_offset_h(naive + 5 * 3600) * 3600
 
 
+_ACCEPTED = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})")
+
+
+def _accepted_ts(s):
+    """SEC's acceptanceDateTime ("2026-10-16T16:05:12.000Z") is New York wall-clock time even
+    though it ends in Z; read as UTC an after-close 8-K would look like it came out mid-session."""
+    m = _ACCEPTED.match(str(s or "").strip())
+    if not m:
+        return None
+    try:
+        y, mo, d, h, mi, sec = (int(x) for x in m.groups())
+        return _et_ts(dt.date(y, mo, d), h, mi) + sec
+    except ValueError:
+        return None
+
+
 def _ymd(s):
     try:
         return dt.date.fromisoformat(str(s).strip()[:10])
@@ -146,12 +162,13 @@ def _stocks(ctx):
     return [s for s in sym_assets(ctx, "stock") if isinstance(s, str) and s.strip()]
 
 
-def _per_ticker(ctx, fn):
-    """Run fn(ticker) -> list[Item] for every subscribed stock in the context. One ticker
-    failing is logged and skipped; if every ticker failed the first error is raised.
-    A rate limit stops the run at once (the worker honours its Retry-After)."""
+def _per_ticker(ctx, fn, cap=None):
+    """Run fn(ticker) -> list[Item] for the subscribed stocks in the context (at most `cap`,
+    requested ones first). One ticker failing is logged and skipped; if every ticker failed
+    the first error is raised. A rate limit stops the run at once (the worker honours its
+    Retry-After)."""
     out, errors, ok = [], [], 0
-    for t in _stocks(ctx):
+    for t in _stocks(ctx)[:cap]:
         try:
             out += fn(t)
             ok += 1
@@ -268,7 +285,7 @@ def submissions(ctx, cik) -> tuple[str, list]:
         if not re.fullmatch(r"\d{10}-\d{2}-\d{6}", acc):
             continue
         filed = _ymd(col("filingDate", i))
-        ts = parse_ts(col("acceptanceDateTime", i)) or (
+        ts = _accepted_ts(col("acceptanceDateTime", i)) or (
             _et_ts(filed, 17) if filed else None)     # no acceptance time: assume end of that day
         if ts is None:
             continue
@@ -358,10 +375,8 @@ class SECFilings(Adapter):
             key = "seen:" + t
             seen, out, new = _seen(ctx.state, key), [], []
             for f in filings:
-                if f["accession"] in seen or not (0 <= ctx.now - f["ts"] <= FILING_WINDOW_S) and f["ts"] <= ctx.now:
-                    continue
                 f["ts"] = _past(f["ts"], ctx.now)
-                if ctx.now - f["ts"] > FILING_WINDOW_S:
+                if f["accession"] in seen or ctx.now - f["ts"] > FILING_WINDOW_S:
                     continue
                 lab = label_filing(f["form"], f["items"])
                 if lab is None:
@@ -370,7 +385,7 @@ class SECFilings(Adapter):
                 out.append(_filing_item(self.name, t, name or title, cik, f, lab))
             _remember(ctx.state, key, new)
             return out
-        return _per_ticker(ctx, one)
+        return _per_ticker(ctx, one, self.max_symbols_per_run)
 
 
 # ---------------------------------------------------------------------------- SEC: Atom feeds
@@ -434,7 +449,7 @@ class SECFilingsAtom(Adapter):
                 out.append(_filing_item(self.name, t, "", f["cik"], f, lab))
             _remember(ctx.state, key, new)
             return out
-        return _per_ticker(ctx, one)
+        return _per_ticker(ctx, one, self.max_symbols_per_run)
 
 
 # ---------------------------------------------------------------------------- SEC: Form 4 insider trades
@@ -564,7 +579,7 @@ class SECInsider(Adapter):
                 doc = re.sub(r"^xslF345X\d+/", "", c["doc"])   # strip the stylesheet view to get the raw XML
                 return SEC_ARCHIVE.format(cik=cik, nodash=c["accession"].replace("-", "")) + urllib.parse.quote(doc)
             return _insider_run(self, ctx, t, cands, xml_url)
-        return _per_ticker(ctx, one)
+        return _per_ticker(ctx, one, self.max_symbols_per_run)
 
 
 class SECInsiderAtom(Adapter):
@@ -587,7 +602,7 @@ class SECInsiderAtom(Adapter):
                 # the Atom feed doesn't name the XML document; the full submission text carries it
                 return SEC_ARCHIVE.format(cik=c["cik"], nodash=c["accession"].replace("-", "")) + f"{c['accession']}.txt"
             return _insider_run(self, ctx, t, cands, xml_url)
-        return _per_ticker(ctx, one)
+        return _per_ticker(ctx, one, self.max_symbols_per_run)
 
 
 # ---------------------------------------------------------------------------- earnings
@@ -629,8 +644,10 @@ class EarningsCalendar(Adapter):
             except SourceError as e:
                 errors.append(e)
                 continue
-            if not isinstance(data, dict) or "data" not in data:
-                errors.append(SourceError("api.nasdaq.com: earnings JSON has no data"))
+            status = data.get("status") if isinstance(data, dict) else None
+            code = _num(status.get("rCode")) if isinstance(status, dict) else None
+            if not isinstance(data, dict) or "data" not in data or (data["data"] is None and code not in (None, 200)):
+                errors.append(SourceError(f"api.nasdaq.com: earnings JSON has no data (rCode {code})"))
                 continue
             ok += 1
             rows = (data.get("data") or {}).get("rows") if isinstance(data.get("data"), dict) else None
@@ -696,7 +713,7 @@ class SEC8KEarnings(Adapter):
                                 catalyst="earnings", direction=0, confidence=0.8, official=True))
             _remember(ctx.state, key, [it.facts["accession"] for it in out])
             return out
-        return _per_ticker(ctx, one)
+        return _per_ticker(ctx, one, self.max_symbols_per_run)
 
 
 # ---------------------------------------------------------------------------- news
@@ -744,7 +761,8 @@ class YahooRSS(Adapter):
 
     def fetch(self, ctx):
         return _per_ticker(ctx, lambda t: ticker_news(self.name, ctx, t, self.URL.format(t=urllib.parse.quote(t)),
-                                                      "finance.yahoo.com", _YAHOO_HOSTS, YAHOO_HEADERS))
+                                                      "finance.yahoo.com", _YAHOO_HOSTS, YAHOO_HEADERS),
+                           self.max_symbols_per_run)
 
 
 class NasdaqRSS(Adapter):
@@ -760,7 +778,8 @@ class NasdaqRSS(Adapter):
 
     def fetch(self, ctx):
         return _per_ticker(ctx, lambda t: ticker_news(self.name, ctx, t, self.URL.format(t=urllib.parse.quote(t)),
-                                                      "nasdaq.com", ("nasdaq.com",), NASDAQ_RSS_HEADERS))
+                                                      "nasdaq.com", ("nasdaq.com",), NASDAQ_RSS_HEADERS),
+                           self.max_symbols_per_run)
 
 
 # ---------------------------------------------------------------------------- VIX

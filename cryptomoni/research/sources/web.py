@@ -565,7 +565,9 @@ class SearXNG(Adapter):
     def fetch(self, ctx):
         base = (ctx.cfg or {}).get("searxng_url") if isinstance(ctx.cfg, dict) else None
         if not isinstance(base, str) or not base.lower().startswith(("http://", "https://")):
-            raise SourceError("searxng: set research.searxng_url to your instance to use it")
+            # not configured: stay idle (no request, no failure) rather than make a grown slot look broken
+            ctx.log("searxng: set research.searxng_url to your instance to use it")
+            return []
         base = base.rstrip("/")
 
         def one(sym, asset, seen):

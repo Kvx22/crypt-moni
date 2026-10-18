@@ -135,11 +135,12 @@ class QuarantineDB:
         with self.lock:
             return self.c.execute("SELECT 1 FROM qitems WHERE url_hash=?", (url_hash,)).fetchone() is not None
 
-    def beat(self, name, pid, stats):
+    def beat(self, name, pid, stats, ts=None):
         with self.lock:
             self.c.execute("""INSERT INTO qheart(name,pid,heartbeat,stats) VALUES(?,?,?,?) ON CONFLICT(name) DO UPDATE SET
                               pid=excluded.pid, heartbeat=excluded.heartbeat, stats=excluded.stats""",
-                           (str(name), int(pid or 0), time.time(), json.dumps(stats or {}, default=str)))
+                           (str(name), int(pid or 0), time.time() if ts is None else float(ts),
+                            json.dumps(stats or {}, default=str)))
 
     def hearts(self):
         """{name: dict(pid, heartbeat, stats)}"""
@@ -430,7 +431,7 @@ class Worker:
         with self._beat_lock:
             self.last_beat = now
             try:
-                self.qdb.beat(self.name, os.getpid(), dict(self.stats, ts=now))
+                self.qdb.beat(self.name, os.getpid(), dict(self.stats, ts=now), ts=now)
             except sqlite3.Error as e:
                 self.log(f"heartbeat failed: {e}")
 
@@ -616,10 +617,12 @@ class Worker:
 
 
 def _watch_stdin(stop):
-    """Sets `stop` when stdin reaches EOF: the parent closed the pipe or died."""
-    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    """Sets `stop` when stdin reaches EOF: the parent closed the pipe or died.
+    Reads the raw file descriptor: a daemon thread parked inside sys.stdin's buffered
+    reader holds its lock and makes the interpreter abort at shutdown."""
     try:
-        while stream.read(1024):
+        fd = sys.stdin.fileno()
+        while os.read(fd, 1024):
             pass
     except (OSError, ValueError, AttributeError):
         pass
