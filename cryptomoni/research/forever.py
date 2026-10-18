@@ -763,7 +763,8 @@ class ForeverSupervisor:
         return None
 
     def _crashed(self, now, why):
-        lived = now - (self.started_ts or now)
+        started = now if self.started_ts is None else self.started_ts
+        lived = now - started
         self.consec = 1 if lived >= CRASH_WINDOW_S else self.consec + 1
         self.crashes = [t for t in self.crashes if now - t <= CRASH_WINDOW_S] + [now]
         delay = BACKOFF_S[min(self.consec - 1, len(BACKOFF_S) - 1)]
@@ -784,14 +785,15 @@ class ForeverSupervisor:
             if self.proc is not None:
                 if self.alive():
                     h = self.heart()
+                    started = now if self.started_ts is None else self.started_ts
                     beat = (h or {}).get("heartbeat") or 0.0
-                    since = now - max(beat if (h and h.get("pid") == self.proc.pid) else 0.0, self.started_ts or now)
-                    progress = ((h or {}).get("stats") or {}).get("progress_ts") or self.started_ts or now
+                    since = now - max(beat if (h and h.get("pid") == self.proc.pid) else 0.0, started)
+                    progress = _num(((h or {}).get("stats") or {}).get("progress_ts"), started)
                     if since > HUNG_S:
                         self._kill(grace=1.0)
                         self._crashed(now, f"no heartbeat for {since:.0f}s (hung)")
                     elif h and h.get("pid") == getattr(self.proc, "pid", None) and now - progress > STALLED_S \
-                            and now - (self.started_ts or now) > STALLED_S:
+                            and now - started > STALLED_S:
                         self._kill(grace=1.0)
                         self._crashed(now, f"no progress for {now - progress:.0f}s (stalled)")
                     else:
