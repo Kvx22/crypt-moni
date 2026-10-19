@@ -55,7 +55,7 @@ class Service:
         self.world, self.clock, self.log = world, clock or time.time, log
         self.sim = world is not None or _sim(cfg)
         ua = DEFAULT_UA + (f" contact:{self.rc['contact']}" if self.rc.get("contact") else "")
-        self.http = http or Http(user_agent=ua)
+        self.http = http or Http(user_agent=ua, sec_contact=self.rc.get("contact"))
         self.owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self.timers = {}
         self.alerted = {}

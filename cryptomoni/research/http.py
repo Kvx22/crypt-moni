@@ -92,11 +92,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None   # redirects are followed by Http.get itself so each hop is re-checked
 
 
+def sec_user_agent(contact):
+    """SEC's fair-access filter wants a plain 'name email' identity and answers anything fancier with HTTP 403."""
+    contact = str(contact or "").strip()
+    return f"crypt-moni {contact}" if contact else None
+
+
 class Http:
     """Thread-safe. One instance per process is enough (the domain clock is shared)."""
 
     def __init__(self, user_agent=DEFAULT_UA, default_gap=1.0, timeout=20.0, max_bytes=MAX_BYTES,
-                 guard_private=False, allow_hosts=(), respect_robots=False):
+                 guard_private=False, allow_hosts=(), respect_robots=False, sec_contact=None):
+        self.sec_ua = sec_user_agent(sec_contact)
         self.ua, self.default_gap, self.timeout, self.max_bytes = user_agent, default_gap, timeout, max_bytes
         self.guard_private, self.allow_hosts, self.respect_robots = guard_private, set(allow_hosts), respect_robots
         self._next = {}           # domain -> earliest next request time
@@ -177,6 +184,8 @@ class Http:
         self._wait_turn(host)
         h = {"User-Agent": self.ua, "Accept-Encoding": "gzip, deflate", "Accept": "*/*"}
         h.update(headers or {})
+        if self.sec_ua and (host == "sec.gov" or host.endswith(".sec.gov")):
+            h["User-Agent"] = self.sec_ua
         req = urllib.request.Request(url, headers=h, data=data, method=method)
         cap = max_bytes or self.max_bytes
         self.stats["requests"] += 1

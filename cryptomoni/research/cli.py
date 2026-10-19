@@ -105,7 +105,8 @@ def probe(cfg, team=None):
     if not any(a == "stock" for a in subs.values()):
         subs.update({"SPY": "stock", "NVDA": "stock"})   # so the stock sources get probed too
     al = Aliases(subs)
-    http = Http(user_agent=DEFAULT_UA + (f" contact:{rc['contact']}" if rc.get("contact") else ""))
+    http = Http(user_agent=DEFAULT_UA + (f" contact:{rc['contact']}" if rc.get("contact") else ""),
+                sec_contact=rc.get("contact"))
     ok = bad = 0
     for ad in sources.catalog(rc):
         if team and ad.team != team:
